@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { getThresholds } from '../src/config.js';
-import { detectSplitArtwork } from '../src/detector.js';
+import { detectBorderArtifactDepth, detectSplitArtwork } from '../src/detector.js';
 import { getRegisteredTweetMedia, ingestGraphqlObject } from '../src/interceptor.js';
 import { computeLayoutPlan } from '../src/stitcher.js';
 
@@ -295,4 +295,131 @@ test('regression: canvas downscale cap strictly stays within browser pixel budge
   assert.ok(capped.width <= 16000);
   assert.ok(capped.height <= 16000);
   assert.ok(capped.width * capped.height <= 120_000_000);
+});
+
+function darkenRightBorder(img, thickness = 1, factor = 0.52) {
+  const data = new Uint8ClampedArray(img.data);
+  for (let y = 0; y < img.height; y++) {
+    for (let dx = 0; dx < thickness; dx++) {
+      const x = img.width - 1 - dx;
+      const idx = (y * img.width + x) * 4;
+      data[idx] = Math.round(data[idx] * factor);
+      data[idx + 1] = Math.round(data[idx + 1] * factor);
+      data[idx + 2] = Math.round(data[idx + 2] * factor);
+    }
+  }
+  return { ...img, data };
+}
+
+test('regression: detects mixed carousel partial split with 1px dark border artifact without swallowing neighbors', () => {
+  // Modeled after real 11-image mixed carousel: 4-slice horizontal artwork (with a 1px dark
+  // artifact line on slice #0 right edge and pure-white right margin on slice #3) followed by
+  // 7 standalone artworks including a white-background sketch right next to #3 and dark-bg pairs.
+  const panorama = generateArtwork(800, 400, 1337);
+  // Make the far-right margin of slice #3 pure white like an illustration on white canvas.
+  for (let y = 0; y < panorama.height; y++) {
+    for (let x = 740; x < panorama.width; x++) {
+      const idx = (y * panorama.width + x) * 4;
+      panorama.data[idx] = 255;
+      panorama.data[idx + 1] = 255;
+      panorama.data[idx + 2] = 255;
+    }
+  }
+
+  const s0Raw = cropImage(panorama, 0, 0, 200, 400);
+  const s0 = darkenRightBorder(s0Raw, 1, 0.52);
+  const s1 = cropImage(panorama, 200, 0, 200, 400);
+  const s2 = cropImage(panorama, 400, 0, 200, 400);
+  const s3 = cropImage(panorama, 600, 0, 200, 400);
+
+  assert.equal(detectBorderArtifactDepth(s0, 'right', 2), 1);
+  assert.equal(detectBorderArtifactDepth(s1, 'left', 2), 0);
+
+  const mixed = [
+    s0,
+    s1,
+    s2,
+    s3,
+    generateCenteredSketch(240, 400, [255, 255, 255], 7001),
+    generateCenteredSketch(240, 400, [22, 24, 30], 7002),
+    generateCenteredSketch(240, 400, [22, 24, 30], 7003),
+    generateArtwork(280, 400, 7004),
+    generateArtwork(280, 400, 7005),
+    generateArtwork(200, 400, 7006),
+    generateArtwork(280, 400, 7007),
+  ];
+
+  const res = detectSplitArtwork(mixed, NORMAL);
+  assert.equal(res.isMatch, true);
+  assert.equal(res.isPartial, true);
+  assert.equal(res.groups.length, 8);
+  assert.equal(res.groups[0].type, 'stitched');
+  assert.deepEqual(res.groups[0].indices, [0, 1, 2, 3]);
+  assert.equal(res.groups[0].layout, 'horizontal');
+  assert.deepEqual(res.groups[0].order, [0, 1, 2, 3]);
+  for (let i = 1; i < res.groups.length; i++) {
+    assert.equal(res.groups[i].type, 'single');
+    assert.equal(res.groups[i].index, i + 3);
+  }
+
+  // Verify layout planner honors internal seam trims without distorting height.
+  const plan = computeLayoutPlan(
+    [s0, s1, s2, s3],
+    'horizontal',
+    [0, 1, 2, 3],
+    [{ right: 1 }, {}, {}, {}],
+  );
+  assert.equal(plan.width, 799);
+  assert.equal(plan.height, 400);
+  assert.equal(plan.rects[0].sw, 199);
+  assert.equal(plan.rects[1].x, 199);
+});
+
+test('regression: extracts multiple disjoint split groups (2x2 + horizontal strip) alongside standalone covers', () => {
+  const cover = generateArtwork(260, 320, 8100);
+  const artGrid = generateArtwork(360, 360, 8200);
+  const gTL = cropImage(artGrid, 0, 0, 180, 180);
+  const gTR = cropImage(artGrid, 180, 0, 180, 180);
+  const gBL = cropImage(artGrid, 0, 180, 180, 180);
+  const gBR = cropImage(artGrid, 180, 180, 180, 180);
+
+  const artStrip = generateArtwork(480, 260, 8300);
+  const p0 = cropImage(artStrip, 0, 0, 160, 260);
+  const p1 = cropImage(artStrip, 160, 0, 160, 260);
+  const p2 = cropImage(artStrip, 320, 0, 160, 260);
+
+  // [cover, scrambled 2x2 (4 tiles), 3-slice horizontal strip]
+  const carousel = [cover, gBL, gTL, gBR, gTR, p0, p1, p2];
+  const res = detectSplitArtwork(carousel, NORMAL);
+
+  assert.equal(res.isMatch, true);
+  assert.equal(res.isPartial, true);
+  assert.equal(res.groups.length, 3);
+  assert.deepEqual(res.groups[0], { type: 'single', index: 0 });
+  assert.equal(res.groups[1].type, 'stitched');
+  assert.deepEqual(res.groups[1].indices, [1, 2, 3, 4]);
+  assert.equal(res.groups[1].layout, 'grid-2x2');
+  assert.deepEqual(res.groups[1].order, [1, 3, 0, 2]);
+  assert.equal(res.groups[1].wasUnshuffled, true);
+  assert.equal(res.groups[2].type, 'stitched');
+  assert.deepEqual(res.groups[2].indices, [5, 6, 7]);
+  assert.equal(res.groups[2].layout, 'horizontal');
+  assert.deepEqual(res.groups[2].order, [0, 1, 2]);
+});
+
+test('regression: never falsely extracts partial split groups from unrelated multi-image dumps', () => {
+  const dump = [
+    generateCenteredSketch(220, 260, [255, 255, 255], 9101),
+    generateCenteredSketch(220, 260, [255, 255, 255], 9102),
+    generateCenteredSketch(220, 260, [18, 20, 26], 9103),
+    generateCenteredSketch(220, 260, [18, 20, 26], 9104),
+    generateArtwork(220, 260, 9105),
+    generateArtwork(220, 260, 9106),
+    generateArtwork(220, 260, 9107),
+    generateArtwork(220, 260, 9108),
+  ];
+  const res = detectSplitArtwork(dump, NORMAL);
+  assert.equal(res.isMatch, false);
+  assert.equal(res.isPartial, false);
+  assert.equal(res.groups.length, 0);
 });

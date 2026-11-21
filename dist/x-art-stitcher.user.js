@@ -1747,15 +1747,63 @@
     return galleries;
   }
 
+  // --- icons.js ---
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  // Official Google Material Icons (Outlined, 24x24 viewBox, Apache-2.0).
+  // Inlined as SVG path data so icons render crisply under X's strict CSP without external font requests.
+  const MATERIAL_ICONS = {
+    grid_view:
+      'M3 3v8h8V3H3zm6 6H5V5h4v4zM3 13v8h8v-8H3zm6 6H5v-4h4v4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13v8h8v-8h-8zm6 6h-4v-4h4v4z',
+    auto_awesome:
+      'M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm0 6l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15zm-7.5-5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zm-1.51 3.49L9 15.17l-.99-2.18L5.83 12l2.18-.99L9 8.83l.99 2.18 2.18.99-2.18.99z',
+    swap_horiz:
+      'M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z',
+    zoom_in:
+      'M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zM12 10h-2v2H9v-2H7V9h2V7h1v2h2v1z',
+    content_copy:
+      'M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z',
+    download:
+      'M19 9h-4V3H9v6H5l7 7 7-7zm-8 2V5h2v6h1.17L12 13.17 9.83 11H11zm-6 7h14v2H5z',
+    settings:
+      'M19.43 12.98c.04-.32.07-.64.07-.98 0-.34-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65A.488.488 0 0 0 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1a.566.566 0 0 0-.18-.03c-.17 0-.34.09-.43.25l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98 0 .33.03.66.07.98l-2.11 1.65c-.19.15-.24.42-.12.64l2 3.46a.5.5 0 0 0 .61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.06.02.12.03.18.03.17 0 .34-.09.43-.25l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zm-1.98-1.71c.04.31.05.52.05.73 0 .21-.02.43-.05.73l-.14 1.13.89.7 1.08.84-.7 1.21-1.27-.51-1.04-.42-.9.68c-.43.32-.84.56-1.25.73l-1.06.43-.16 1.13-.2 1.35h-1.4l-.19-1.35-.16-1.13-1.06-.43c-.43-.18-.83-.41-1.23-.71l-.91-.7-1.06.43-1.27.51-.7-1.21 1.08-.84.89-.7-.14-1.13c-.03-.31-.05-.54-.05-.74s.02-.43.05-.73l.14-1.13-.89-.7-1.08-.84.7-1.21 1.27.51 1.04.42.9-.68c.43-.32.84-.56 1.25-.73l1.06-.43.16-1.13.2-1.35h1.39l.19 1.35.16 1.13 1.06.43c.43.18.83.41 1.23.71l.91.7 1.06-.43 1.27-.51.7 1.21-1.07.85-.89.7.14 1.13zM12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm0 6c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z',
+    close:
+      'M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
+    fit_screen:
+      'M6 16h12V8H6zm2-6h8v4H8zm-4 5H2v3c0 1.1.9 2 2 2h3v-2H4zm0-9h3V4H4c-1.1 0-2 .9-2 2v3h2zm16-2h-3v2h3v3h2V6c0-1.1-.9-2-2-2m0 14h-3v2h3c1.1 0 2-.9 2-2v-3h-2z',
+    restart_alt:
+      'M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z',
+  };
+
+  function createIcon(name, size = 16) {
+    const pathData = MATERIAL_ICONS[name];
+    if (!pathData) {
+      throw new Error(`Unknown Material icon: ${name}`);
+    }
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', String(size));
+    svg.setAttribute('height', String(size));
+    svg.setAttribute('fill', 'currentColor');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    svg.setAttribute('class', 'xas-icon');
+
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', pathData);
+    svg.appendChild(path);
+    return svg;
+  }
+
   // --- ui.js ---
   const IS_ZH = typeof navigator !== 'undefined' && /^zh/i.test(navigator.language || '');
 
   const TEXT = {
     stitch: IS_ZH ? '拼图' : 'Stitch',
-    suggested: IS_ZH ? '✦ 检测到拼图' : '✦ Split Detected',
+    suggested: IS_ZH ? '检测到拼图' : 'Split Detected',
     original: IS_ZH ? '原图' : 'Orig',
     auto: IS_ZH ? '自动' : 'Auto',
-    unshuffledBadge: IS_ZH ? '✦ 已自动复原顺序' : '✦ Auto Unshuffled',
+    unshuffledBadge: IS_ZH ? '已自动复原顺序' : 'Auto Unshuffled',
     orderBtnTitle: IS_ZH ? '调整切片顺序' : 'Adjust tile order',
     orderHint: IS_ZH ? '点击两块交换:' : 'Swap two:',
     autoOrder: IS_ZH ? '自动排序' : 'Auto',
@@ -1849,6 +1897,29 @@
     event.stopPropagation();
   }
 
+  function appendIconLabel(el, iconName, label, iconSize = 15) {
+    if (iconName) el.appendChild(createIcon(iconName, iconSize));
+    if (label) {
+      const text = document.createElement('span');
+      text.textContent = label;
+      el.appendChild(text);
+    }
+  }
+
+  function makeIconButton({ icon, title, size = 16, active = false, onClick }) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = active ? 'xas-btn xas-btn-icon xas-btn-active' : 'xas-btn xas-btn-icon';
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.appendChild(createIcon(icon, size));
+    btn.addEventListener('click', (e) => {
+      stopBubble(e);
+      onClick();
+    });
+    return btn;
+  }
+
   function openLightbox({ url, title, width, height, onDownload, onCopy }) {
     const existing = document.querySelector('.xas-lightbox');
     if (existing) existing.remove();
@@ -1866,11 +1937,11 @@
     const actions = document.createElement('div');
     actions.className = 'xas-lb-actions';
 
-    const makeBtn = (label, primary, handler) => {
+    const makeBtn = (label, primary, handler, iconName = null) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = primary ? 'xas-lb-btn xas-lb-primary' : 'xas-lb-btn';
-      btn.textContent = label;
+      appendIconLabel(btn, iconName, label, 16);
       btn.addEventListener('click', (e) => {
         stopBubble(e);
         handler();
@@ -2029,11 +2100,11 @@
       }
     });
 
-    actions.appendChild(makeBtn(t('lbFit'), false, setFit));
+    actions.appendChild(makeBtn(t('lbFit'), false, setFit, 'fit_screen'));
     actions.appendChild(makeBtn(t('lbActual'), false, setActual));
-    actions.appendChild(makeBtn(t('lbCopy'), false, onCopy));
-    actions.appendChild(makeBtn(t('lbDownload'), true, onDownload));
-    actions.appendChild(makeBtn(t('lbClose'), false, close));
+    actions.appendChild(makeBtn(t('lbCopy'), false, onCopy, 'content_copy'));
+    actions.appendChild(makeBtn(t('lbDownload'), true, onDownload, 'download'));
+    actions.appendChild(makeBtn(t('lbClose'), false, close, 'close'));
 
     header.appendChild(titleEl);
     header.appendChild(actions);
@@ -2062,11 +2133,12 @@
     head.className = 'xas-modal-head';
     const heading = document.createElement('h3');
     heading.textContent = t('settingsHeading');
-    const closeX = document.createElement('button');
-    closeX.type = 'button';
-    closeX.className = 'xas-btn';
-    closeX.textContent = '✕';
-    closeX.addEventListener('click', () => backdrop.remove());
+    const closeX = makeIconButton({
+      icon: 'close',
+      title: t('lbClose'),
+      size: 18,
+      onClick: () => backdrop.remove(),
+    });
     head.appendChild(heading);
     head.appendChild(closeX);
 
@@ -2237,7 +2309,7 @@
     const layouts = getAvailableLayouts(urls.length);
 
     const renderToolbar = () => {
-      toolbar.innerHTML = '';
+      toolbar.textContent = '';
       toolbar.classList.toggle('xas-expanded', state.expanded || state.stitched);
 
       const pill = document.createElement('div');
@@ -2260,9 +2332,16 @@
         const trigger = document.createElement('button');
         trigger.type = 'button';
         trigger.className = state.suggested ? 'xas-btn xas-btn-accent' : 'xas-btn';
-        trigger.textContent = state.suggested
-          ? `${t('suggested')} (${getLayoutLabel(state.suggested.layout)})`
-          : `⊞ ${t('stitch')}`;
+        if (state.suggested) {
+          appendIconLabel(
+            trigger,
+            'auto_awesome',
+            `${t('suggested')} (${getLayoutLabel(state.suggested.layout)})`,
+            15,
+          );
+        } else {
+          appendIconLabel(trigger, 'grid_view', t('stitch'), 15);
+        }
         trigger.addEventListener('click', (e) => {
           stopBubble(e);
           if (state.suggested) {
@@ -2313,7 +2392,7 @@
         const autoBtn = document.createElement('button');
         autoBtn.type = 'button';
         autoBtn.className = 'xas-btn xas-btn-accent';
-        autoBtn.textContent = `✦ ${t('auto')}`;
+        appendIconLabel(autoBtn, 'auto_awesome', t('auto'), 15);
         autoBtn.addEventListener('click', (e) => {
           stopBubble(e);
           callbacks.onAutoSolve();
@@ -2324,63 +2403,48 @@
         sep.className = 'xas-sep';
         pill.appendChild(sep);
 
-        const orderBtn = document.createElement('button');
-        orderBtn.type = 'button';
-        orderBtn.className = state.showOrderEditor ? 'xas-btn xas-btn-active' : 'xas-btn';
-        orderBtn.title = t('orderBtnTitle');
-        orderBtn.textContent = '⇄';
-        orderBtn.addEventListener('click', (e) => {
-          stopBubble(e);
-          state.showOrderEditor = !state.showOrderEditor;
-          state.selectedSlot = null;
-          renderToolbar();
-        });
-        pill.appendChild(orderBtn);
-
-        const zoomBtn = document.createElement('button');
-        zoomBtn.type = 'button';
-        zoomBtn.className = 'xas-btn';
-        zoomBtn.title = t('zoomTitle');
-        zoomBtn.textContent = '🔍';
-        zoomBtn.addEventListener('click', (e) => {
-          stopBubble(e);
-          callbacks.onOpenLightbox();
-        });
-        pill.appendChild(zoomBtn);
-
-        const copyBtn = document.createElement('button');
-        copyBtn.type = 'button';
-        copyBtn.className = 'xas-btn';
-        copyBtn.title = t('copyTitle');
-        copyBtn.textContent = '📋';
-        copyBtn.addEventListener('click', (e) => {
-          stopBubble(e);
-          callbacks.onCopy();
-        });
-        pill.appendChild(copyBtn);
-
-        const dlBtn = document.createElement('button');
-        dlBtn.type = 'button';
-        dlBtn.className = 'xas-btn';
-        dlBtn.title = t('downloadTitle');
-        dlBtn.textContent = '⬇';
-        dlBtn.addEventListener('click', (e) => {
-          stopBubble(e);
-          callbacks.onDownload();
-        });
-        pill.appendChild(dlBtn);
+        pill.appendChild(
+          makeIconButton({
+            icon: 'swap_horiz',
+            title: t('orderBtnTitle'),
+            active: state.showOrderEditor,
+            onClick: () => {
+              state.showOrderEditor = !state.showOrderEditor;
+              state.selectedSlot = null;
+              renderToolbar();
+            },
+          }),
+        );
+        pill.appendChild(
+          makeIconButton({
+            icon: 'zoom_in',
+            title: t('zoomTitle'),
+            onClick: callbacks.onOpenLightbox,
+          }),
+        );
+        pill.appendChild(
+          makeIconButton({
+            icon: 'content_copy',
+            title: t('copyTitle'),
+            onClick: callbacks.onCopy,
+          }),
+        );
+        pill.appendChild(
+          makeIconButton({
+            icon: 'download',
+            title: t('downloadTitle'),
+            onClick: callbacks.onDownload,
+          }),
+        );
       }
 
-      const gearBtn = document.createElement('button');
-      gearBtn.type = 'button';
-      gearBtn.className = 'xas-btn';
-      gearBtn.title = t('settingsTitle');
-      gearBtn.textContent = '⚙';
-      gearBtn.addEventListener('click', (e) => {
-        stopBubble(e);
-        callbacks.onOpenSettings();
-      });
-      pill.appendChild(gearBtn);
+      pill.appendChild(
+        makeIconButton({
+          icon: 'settings',
+          title: t('settingsTitle'),
+          onClick: callbacks.onOpenSettings,
+        }),
+      );
 
       toolbar.appendChild(pill);
 
@@ -2424,7 +2488,7 @@
         const autoOrderBtn = document.createElement('button');
         autoOrderBtn.type = 'button';
         autoOrderBtn.className = 'xas-btn xas-btn-accent';
-        autoOrderBtn.textContent = t('autoOrder');
+        appendIconLabel(autoOrderBtn, 'auto_awesome', t('autoOrder'), 14);
         autoOrderBtn.addEventListener('click', (e) => {
           stopBubble(e);
           callbacks.onAutoSolve(state.activeLayout);
@@ -2434,7 +2498,7 @@
         const resetOrderBtn = document.createElement('button');
         resetOrderBtn.type = 'button';
         resetOrderBtn.className = 'xas-btn';
-        resetOrderBtn.textContent = t('resetOrder');
+        appendIconLabel(resetOrderBtn, 'restart_alt', t('resetOrder'), 14);
         resetOrderBtn.addEventListener('click', (e) => {
           stopBubble(e);
           callbacks.onChangeOrder(Array.from({ length: urls.length }, (_, i) => i));
@@ -2466,9 +2530,15 @@
         state.wasUnshuffled = Boolean(wasUnshuffled);
 
         previewImg.src = objectUrl;
+        metaBadge.textContent = '';
         const parts = [getLayoutLabel(layout), `${width}×${height}`];
-        if (state.wasUnshuffled) parts.unshift(t('unshuffledBadge'));
-        metaBadge.textContent = parts.join(' · ');
+        if (state.wasUnshuffled) {
+          metaBadge.appendChild(createIcon('auto_awesome', 14));
+          parts.unshift(t('unshuffledBadge'));
+        }
+        const metaText = document.createElement('span');
+        metaText.textContent = parts.join(' · ');
+        metaBadge.appendChild(metaText);
 
         stage.style.display = 'flex';
         container.classList.add('xas-active');
@@ -2493,7 +2563,7 @@
 
   // --- main.js ---
   // Replaced at build time with contents of src/styles.css.
-  const STYLES_CSS = ".xas-root {\n  position: relative !important;\n}\n\n.xas-root.xas-active {\n  height: auto !important;\n  min-height: 0 !important;\n  overflow: visible !important;\n}\n\n.xas-root.xas-active > :not(.xas-injected) {\n  display: none !important;\n}\n\n.xas-stage {\n  position: relative;\n  width: 100%;\n  border-radius: 16px;\n  overflow: hidden;\n  background: rgba(15, 20, 25, 0.35);\n  border: 1px solid rgba(128, 128, 128, 0.22);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n}\n\n.xas-preview {\n  display: block;\n  width: 100%;\n  height: auto;\n  max-height: 82vh;\n  object-fit: contain;\n  cursor: zoom-in;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-toolbar {\n  position: absolute;\n  top: 8px;\n  right: 8px;\n  z-index: 30;\n  max-width: calc(100% - 16px);\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 12px;\n  line-height: 1;\n  pointer-events: auto;\n}\n\n.xas-pill {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  padding: 4px 6px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.78);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  backdrop-filter: blur(10px);\n  -webkit-backdrop-filter: blur(10px);\n  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);\n  opacity: 0.78;\n  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;\n}\n\n.xas-root:hover .xas-pill,\n.xas-toolbar:hover .xas-pill,\n.xas-toolbar.xas-expanded .xas-pill,\n.xas-pill.xas-suggested {\n  opacity: 1;\n}\n\n.xas-pill.xas-suggested {\n  border-color: rgba(29, 155, 240, 0.75);\n  background: rgba(15, 24, 34, 0.88);\n}\n\n.xas-pill.xas-collapsed {\n  opacity: 0.52;\n  padding: 3px 8px;\n}\n\n.xas-root:hover .xas-pill.xas-collapsed {\n  opacity: 0.95;\n}\n\n.xas-btn {\n  appearance: none;\n  border: none;\n  background: transparent;\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  padding: 5px 8px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  white-space: nowrap;\n  transition: background 0.14s ease, color 0.14s ease;\n}\n\n.xas-btn:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.xas-btn:disabled {\n  opacity: 0.45;\n  cursor: wait;\n}\n\n.xas-btn.xas-btn-active {\n  background: #1d9bf0;\n  color: #ffffff;\n}\n\n.xas-btn.xas-btn-accent {\n  color: #6cc5ff;\n}\n\n.xas-sep {\n  width: 1px;\n  height: 14px;\n  background: rgba(255, 255, 255, 0.18);\n  margin: 0 2px;\n}\n\n.xas-order-bar {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 4px;\n  padding: 5px 8px;\n  border-radius: 12px;\n  background: rgba(15, 20, 25, 0.9);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  backdrop-filter: blur(10px);\n  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);\n}\n\n.xas-order-hint {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-right: 2px;\n}\n\n.xas-slot-chip {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.24);\n  background: rgba(255, 255, 255, 0.08);\n  color: #eff3f4;\n  font: inherit;\n  font-weight: 700;\n  min-width: 24px;\n  height: 24px;\n  padding: 0 6px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;\n}\n\n.xas-slot-chip:hover {\n  background: rgba(255, 255, 255, 0.2);\n}\n\n.xas-slot-chip.xas-slot-selected {\n  background: #1d9bf0;\n  border-color: #6cc5ff;\n  color: #fff;\n  transform: scale(1.06);\n}\n\n.xas-meta-badge {\n  position: absolute;\n  left: 10px;\n  bottom: 10px;\n  z-index: 25;\n  padding: 4px 9px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.72);\n  color: #e7e9ea;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 11px;\n  font-weight: 600;\n  border: 1px solid rgba(255, 255, 255, 0.14);\n  backdrop-filter: blur(8px);\n  pointer-events: none;\n  opacity: 0;\n  transition: opacity 0.18s ease;\n}\n\n.xas-stage:hover .xas-meta-badge,\n.xas-root:hover .xas-meta-badge {\n  opacity: 1;\n}\n\n.xas-spinner {\n  display: inline-block;\n  width: 12px;\n  height: 12px;\n  border: 2px solid rgba(255, 255, 255, 0.28);\n  border-top-color: #1d9bf0;\n  border-radius: 50%;\n  animation: xas-spin 0.75s linear infinite;\n}\n\n@keyframes xas-spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n/* Fullscreen Lightbox */\n.xas-lightbox {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  background: rgba(0, 0, 0, 0.92);\n  backdrop-filter: blur(10px);\n  display: flex;\n  flex-direction: column;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  color: #eff3f4;\n  user-select: none;\n}\n\n.xas-lb-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 18px;\n  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));\n  z-index: 2;\n}\n\n.xas-lb-title {\n  font-size: 13px;\n  font-weight: 600;\n  color: #e7e9ea;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xas-lb-actions {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-shrink: 0;\n}\n\n.xas-lb-btn {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(25, 32, 40, 0.85);\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  padding: 6px 12px;\n  border-radius: 999px;\n  cursor: pointer;\n  transition: background 0.15s ease, border-color 0.15s ease;\n}\n\n.xas-lb-btn:hover {\n  background: rgba(45, 58, 72, 0.95);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-lb-btn.xas-lb-primary {\n  background: #1d9bf0;\n  border-color: #1d9bf0;\n  color: #fff;\n}\n\n.xas-lb-btn.xas-lb-primary:hover {\n  background: #1a8cd8;\n}\n\n.xas-lb-viewport {\n  flex: 1;\n  position: relative;\n  overflow: hidden;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  cursor: grab;\n}\n\n.xas-lb-viewport.xas-dragging {\n  cursor: grabbing;\n}\n\n.xas-lb-img {\n  max-width: none;\n  max-height: none;\n  transform-origin: center center;\n  will-change: transform;\n  -webkit-user-drag: none;\n  user-select: none;\n  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);\n}\n\n.xas-lb-footer {\n  padding: 8px 16px;\n  text-align: center;\n  font-size: 11px;\n  color: #8b98a5;\n  pointer-events: none;\n}\n\n/* Settings Modal */\n.xas-modal-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483100;\n  background: rgba(0, 0, 0, 0.65);\n  backdrop-filter: blur(4px);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 16px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n}\n\n.xas-modal {\n  width: 100%;\n  max-width: 440px;\n  background: #15202b;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  border-radius: 16px;\n  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);\n  overflow: hidden;\n}\n\n.xas-modal-head {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 18px;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.xas-modal-head h3 {\n  margin: 0;\n  font-size: 16px;\n  font-weight: 700;\n}\n\n.xas-modal-body {\n  padding: 16px 18px;\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n\n.xas-field {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  font-size: 13px;\n}\n\n.xas-field-col {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  font-size: 13px;\n}\n\n.xas-field-desc {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-top: 2px;\n}\n\n.xas-select,\n.xas-input {\n  background: #1e2d3d;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  border-radius: 8px;\n  padding: 6px 10px;\n  font: inherit;\n  font-size: 13px;\n}\n\n.xas-checkbox {\n  width: 18px;\n  height: 18px;\n  accent-color: #1d9bf0;\n  cursor: pointer;\n}\n\n.xas-modal-foot {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 18px;\n  border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n/* Toast */\n.xas-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 26px;\n  transform: translateX(-50%) translateY(12px);\n  z-index: 2147483200;\n  padding: 10px 16px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.94);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s ease, transform 0.18s ease;\n}\n\n.xas-toast.xas-toast-visible {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n\n.xas-toast.xas-toast-error {\n  border-color: rgba(244, 33, 46, 0.7);\n  color: #ff9aa2;\n}";
+  const STYLES_CSS = ".xas-root {\n  position: relative !important;\n}\n\n.xas-root.xas-active {\n  height: auto !important;\n  min-height: 0 !important;\n  overflow: visible !important;\n}\n\n.xas-root.xas-active > :not(.xas-injected) {\n  display: none !important;\n}\n\n.xas-stage {\n  position: relative;\n  width: 100%;\n  border-radius: 16px;\n  overflow: hidden;\n  background: rgba(15, 20, 25, 0.35);\n  border: 1px solid rgba(128, 128, 128, 0.22);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n}\n\n.xas-preview {\n  display: block;\n  width: 100%;\n  height: auto;\n  max-height: 82vh;\n  object-fit: contain;\n  cursor: zoom-in;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-toolbar {\n  position: absolute;\n  top: 8px;\n  right: 8px;\n  z-index: 30;\n  max-width: calc(100% - 16px);\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 12px;\n  line-height: 1;\n  pointer-events: auto;\n}\n\n.xas-pill {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  padding: 4px 6px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.78);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  backdrop-filter: blur(10px);\n  -webkit-backdrop-filter: blur(10px);\n  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);\n  opacity: 0.78;\n  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;\n}\n\n.xas-root:hover .xas-pill,\n.xas-toolbar:hover .xas-pill,\n.xas-toolbar.xas-expanded .xas-pill,\n.xas-pill.xas-suggested {\n  opacity: 1;\n}\n\n.xas-pill.xas-suggested {\n  border-color: rgba(29, 155, 240, 0.75);\n  background: rgba(15, 24, 34, 0.88);\n}\n\n.xas-pill.xas-collapsed {\n  opacity: 0.52;\n  padding: 3px 5px;\n}\n\n.xas-root:hover .xas-pill.xas-collapsed {\n  opacity: 0.95;\n}\n\n.xas-icon {\n  display: block;\n  flex-shrink: 0;\n  fill: currentColor;\n}\n\n.xas-btn {\n  appearance: none;\n  border: none;\n  background: transparent;\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 26px;\n  padding: 0 9px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 4px;\n  white-space: nowrap;\n  transition: background 0.14s ease, color 0.14s ease;\n}\n\n.xas-btn.xas-btn-icon {\n  width: 26px;\n  padding: 0;\n}\n\n.xas-btn:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.xas-btn:disabled {\n  opacity: 0.45;\n  cursor: wait;\n}\n\n.xas-btn.xas-btn-active {\n  background: #1d9bf0;\n  color: #ffffff;\n}\n\n.xas-btn.xas-btn-accent {\n  color: #6cc5ff;\n}\n\n.xas-sep {\n  width: 1px;\n  height: 14px;\n  background: rgba(255, 255, 255, 0.18);\n  margin: 0 2px;\n}\n\n.xas-order-bar {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 4px;\n  padding: 5px 8px;\n  border-radius: 12px;\n  background: rgba(15, 20, 25, 0.9);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  backdrop-filter: blur(10px);\n  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);\n}\n\n.xas-order-hint {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-right: 2px;\n}\n\n.xas-slot-chip {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.24);\n  background: rgba(255, 255, 255, 0.08);\n  color: #eff3f4;\n  font: inherit;\n  font-weight: 700;\n  min-width: 24px;\n  height: 24px;\n  padding: 0 6px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;\n}\n\n.xas-slot-chip:hover {\n  background: rgba(255, 255, 255, 0.2);\n}\n\n.xas-slot-chip.xas-slot-selected {\n  background: #1d9bf0;\n  border-color: #6cc5ff;\n  color: #fff;\n  transform: scale(1.06);\n}\n\n.xas-meta-badge {\n  position: absolute;\n  left: 10px;\n  bottom: 10px;\n  z-index: 25;\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  padding: 4px 9px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.72);\n  color: #e7e9ea;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 11px;\n  font-weight: 600;\n  border: 1px solid rgba(255, 255, 255, 0.14);\n  backdrop-filter: blur(8px);\n  pointer-events: none;\n  opacity: 0;\n  transition: opacity 0.18s ease;\n}\n\n.xas-stage:hover .xas-meta-badge,\n.xas-root:hover .xas-meta-badge {\n  opacity: 1;\n}\n\n.xas-spinner {\n  display: inline-block;\n  width: 12px;\n  height: 12px;\n  border: 2px solid rgba(255, 255, 255, 0.28);\n  border-top-color: #1d9bf0;\n  border-radius: 50%;\n  animation: xas-spin 0.75s linear infinite;\n}\n\n@keyframes xas-spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n/* Fullscreen Lightbox */\n.xas-lightbox {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  background: rgba(0, 0, 0, 0.92);\n  backdrop-filter: blur(10px);\n  display: flex;\n  flex-direction: column;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  color: #eff3f4;\n  user-select: none;\n}\n\n.xas-lb-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 18px;\n  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));\n  z-index: 2;\n}\n\n.xas-lb-title {\n  font-size: 13px;\n  font-weight: 600;\n  color: #e7e9ea;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xas-lb-actions {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-shrink: 0;\n}\n\n.xas-lb-btn {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(25, 32, 40, 0.85);\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 30px;\n  padding: 0 12px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  white-space: nowrap;\n  transition: background 0.15s ease, border-color 0.15s ease;\n}\n\n.xas-lb-btn:hover {\n  background: rgba(45, 58, 72, 0.95);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-lb-btn.xas-lb-primary {\n  background: #1d9bf0;\n  border-color: #1d9bf0;\n  color: #fff;\n}\n\n.xas-lb-btn.xas-lb-primary:hover {\n  background: #1a8cd8;\n}\n\n.xas-lb-viewport {\n  flex: 1;\n  position: relative;\n  overflow: hidden;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  cursor: grab;\n}\n\n.xas-lb-viewport.xas-dragging {\n  cursor: grabbing;\n}\n\n.xas-lb-img {\n  max-width: none;\n  max-height: none;\n  transform-origin: center center;\n  will-change: transform;\n  -webkit-user-drag: none;\n  user-select: none;\n  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);\n}\n\n.xas-lb-footer {\n  padding: 8px 16px;\n  text-align: center;\n  font-size: 11px;\n  color: #8b98a5;\n  pointer-events: none;\n}\n\n/* Settings Modal */\n.xas-modal-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483100;\n  background: rgba(0, 0, 0, 0.65);\n  backdrop-filter: blur(4px);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 16px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n}\n\n.xas-modal {\n  width: 100%;\n  max-width: 440px;\n  background: #15202b;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  border-radius: 16px;\n  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);\n  overflow: hidden;\n}\n\n.xas-modal-head {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 18px;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.xas-modal-head h3 {\n  margin: 0;\n  font-size: 16px;\n  font-weight: 700;\n}\n\n.xas-modal-body {\n  padding: 16px 18px;\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n\n.xas-field {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  font-size: 13px;\n}\n\n.xas-field-col {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  font-size: 13px;\n}\n\n.xas-field-desc {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-top: 2px;\n}\n\n.xas-select,\n.xas-input {\n  background: #1e2d3d;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  border-radius: 8px;\n  padding: 6px 10px;\n  font: inherit;\n  font-size: 13px;\n}\n\n.xas-checkbox {\n  width: 18px;\n  height: 18px;\n  accent-color: #1d9bf0;\n  cursor: pointer;\n}\n\n.xas-modal-foot {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 18px;\n  border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n/* Toast */\n.xas-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 26px;\n  transform: translateX(-50%) translateY(12px);\n  z-index: 2147483200;\n  padding: 10px 16px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.94);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s ease, transform 0.18s ease;\n}\n\n.xas-toast.xas-toast-visible {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n\n.xas-toast.xas-toast-error {\n  border-color: rgba(244, 33, 46, 0.7);\n  color: #ff9aa2;\n}";
 
   // Install passive GraphQL/XHR hooks immediately at document-start before X boots.
   installGraphqlInterceptor();

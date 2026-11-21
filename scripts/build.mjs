@@ -15,6 +15,7 @@ const MODULE_ORDER = [
   'detector.js',
   'stitcher.js',
   'dom.js',
+  'icons.js',
   'ui.js',
   'main.js',
 ];

@@ -83,11 +83,17 @@
 
 .xas-pill.xas-collapsed {
   opacity: 0.52;
-  padding: 3px 8px;
+  padding: 3px 5px;
 }
 
 .xas-root:hover .xas-pill.xas-collapsed {
   opacity: 0.95;
+}
+
+.xas-icon {
+  display: block;
+  flex-shrink: 0;
+  fill: currentColor;
 }
 
 .xas-btn {
@@ -98,14 +104,21 @@
   font: inherit;
   font-size: 12px;
   font-weight: 600;
-  padding: 5px 8px;
+  height: 26px;
+  padding: 0 9px;
   border-radius: 999px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
   white-space: nowrap;
   transition: background 0.14s ease, color 0.14s ease;
+}
+
+.xas-btn.xas-btn-icon {
+  width: 26px;
+  padding: 0;
 }
 
 .xas-btn:hover {
@@ -184,6 +197,9 @@
   left: 10px;
   bottom: 10px;
   z-index: 25;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 4px 9px;
   border-radius: 999px;
   background: rgba(15, 20, 25, 0.72);
@@ -267,9 +283,15 @@
   font: inherit;
   font-size: 12px;
   font-weight: 600;
-  padding: 6px 12px;
+  height: 30px;
+  padding: 0 12px;
   border-radius: 999px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 

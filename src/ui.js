@@ -1,13 +1,14 @@
+import { createIcon } from './icons.js';
 import { getAvailableLayouts } from './stitcher.js';
 
 const IS_ZH = typeof navigator !== 'undefined' && /^zh/i.test(navigator.language || '');
 
 const TEXT = {
   stitch: IS_ZH ? '拼图' : 'Stitch',
-  suggested: IS_ZH ? '✦ 检测到拼图' : '✦ Split Detected',
+  suggested: IS_ZH ? '检测到拼图' : 'Split Detected',
   original: IS_ZH ? '原图' : 'Orig',
   auto: IS_ZH ? '自动' : 'Auto',
-  unshuffledBadge: IS_ZH ? '✦ 已自动复原顺序' : '✦ Auto Unshuffled',
+  unshuffledBadge: IS_ZH ? '已自动复原顺序' : 'Auto Unshuffled',
   orderBtnTitle: IS_ZH ? '调整切片顺序' : 'Adjust tile order',
   orderHint: IS_ZH ? '点击两块交换:' : 'Swap two:',
   autoOrder: IS_ZH ? '自动排序' : 'Auto',
@@ -101,6 +102,29 @@ function stopBubble(event) {
   event.stopPropagation();
 }
 
+function appendIconLabel(el, iconName, label, iconSize = 15) {
+  if (iconName) el.appendChild(createIcon(iconName, iconSize));
+  if (label) {
+    const text = document.createElement('span');
+    text.textContent = label;
+    el.appendChild(text);
+  }
+}
+
+function makeIconButton({ icon, title, size = 16, active = false, onClick }) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = active ? 'xas-btn xas-btn-icon xas-btn-active' : 'xas-btn xas-btn-icon';
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+  btn.appendChild(createIcon(icon, size));
+  btn.addEventListener('click', (e) => {
+    stopBubble(e);
+    onClick();
+  });
+  return btn;
+}
+
 export function openLightbox({ url, title, width, height, onDownload, onCopy }) {
   const existing = document.querySelector('.xas-lightbox');
   if (existing) existing.remove();
@@ -118,11 +142,11 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
   const actions = document.createElement('div');
   actions.className = 'xas-lb-actions';
 
-  const makeBtn = (label, primary, handler) => {
+  const makeBtn = (label, primary, handler, iconName = null) => {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = primary ? 'xas-lb-btn xas-lb-primary' : 'xas-lb-btn';
-    btn.textContent = label;
+    appendIconLabel(btn, iconName, label, 16);
     btn.addEventListener('click', (e) => {
       stopBubble(e);
       handler();
@@ -281,11 +305,11 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
     }
   });
 
-  actions.appendChild(makeBtn(t('lbFit'), false, setFit));
+  actions.appendChild(makeBtn(t('lbFit'), false, setFit, 'fit_screen'));
   actions.appendChild(makeBtn(t('lbActual'), false, setActual));
-  actions.appendChild(makeBtn(t('lbCopy'), false, onCopy));
-  actions.appendChild(makeBtn(t('lbDownload'), true, onDownload));
-  actions.appendChild(makeBtn(t('lbClose'), false, close));
+  actions.appendChild(makeBtn(t('lbCopy'), false, onCopy, 'content_copy'));
+  actions.appendChild(makeBtn(t('lbDownload'), true, onDownload, 'download'));
+  actions.appendChild(makeBtn(t('lbClose'), false, close, 'close'));
 
   header.appendChild(titleEl);
   header.appendChild(actions);
@@ -314,11 +338,12 @@ export function openSettingsModal(currentConfig, onSave) {
   head.className = 'xas-modal-head';
   const heading = document.createElement('h3');
   heading.textContent = t('settingsHeading');
-  const closeX = document.createElement('button');
-  closeX.type = 'button';
-  closeX.className = 'xas-btn';
-  closeX.textContent = '✕';
-  closeX.addEventListener('click', () => backdrop.remove());
+  const closeX = makeIconButton({
+    icon: 'close',
+    title: t('lbClose'),
+    size: 18,
+    onClick: () => backdrop.remove(),
+  });
   head.appendChild(heading);
   head.appendChild(closeX);
 
@@ -489,7 +514,7 @@ export function createGalleryUI(gallery, callbacks) {
   const layouts = getAvailableLayouts(urls.length);
 
   const renderToolbar = () => {
-    toolbar.innerHTML = '';
+    toolbar.textContent = '';
     toolbar.classList.toggle('xas-expanded', state.expanded || state.stitched);
 
     const pill = document.createElement('div');
@@ -512,9 +537,16 @@ export function createGalleryUI(gallery, callbacks) {
       const trigger = document.createElement('button');
       trigger.type = 'button';
       trigger.className = state.suggested ? 'xas-btn xas-btn-accent' : 'xas-btn';
-      trigger.textContent = state.suggested
-        ? `${t('suggested')} (${getLayoutLabel(state.suggested.layout)})`
-        : `⊞ ${t('stitch')}`;
+      if (state.suggested) {
+        appendIconLabel(
+          trigger,
+          'auto_awesome',
+          `${t('suggested')} (${getLayoutLabel(state.suggested.layout)})`,
+          15,
+        );
+      } else {
+        appendIconLabel(trigger, 'grid_view', t('stitch'), 15);
+      }
       trigger.addEventListener('click', (e) => {
         stopBubble(e);
         if (state.suggested) {
@@ -565,7 +597,7 @@ export function createGalleryUI(gallery, callbacks) {
       const autoBtn = document.createElement('button');
       autoBtn.type = 'button';
       autoBtn.className = 'xas-btn xas-btn-accent';
-      autoBtn.textContent = `✦ ${t('auto')}`;
+      appendIconLabel(autoBtn, 'auto_awesome', t('auto'), 15);
       autoBtn.addEventListener('click', (e) => {
         stopBubble(e);
         callbacks.onAutoSolve();
@@ -576,63 +608,48 @@ export function createGalleryUI(gallery, callbacks) {
       sep.className = 'xas-sep';
       pill.appendChild(sep);
 
-      const orderBtn = document.createElement('button');
-      orderBtn.type = 'button';
-      orderBtn.className = state.showOrderEditor ? 'xas-btn xas-btn-active' : 'xas-btn';
-      orderBtn.title = t('orderBtnTitle');
-      orderBtn.textContent = '⇄';
-      orderBtn.addEventListener('click', (e) => {
-        stopBubble(e);
-        state.showOrderEditor = !state.showOrderEditor;
-        state.selectedSlot = null;
-        renderToolbar();
-      });
-      pill.appendChild(orderBtn);
-
-      const zoomBtn = document.createElement('button');
-      zoomBtn.type = 'button';
-      zoomBtn.className = 'xas-btn';
-      zoomBtn.title = t('zoomTitle');
-      zoomBtn.textContent = '🔍';
-      zoomBtn.addEventListener('click', (e) => {
-        stopBubble(e);
-        callbacks.onOpenLightbox();
-      });
-      pill.appendChild(zoomBtn);
-
-      const copyBtn = document.createElement('button');
-      copyBtn.type = 'button';
-      copyBtn.className = 'xas-btn';
-      copyBtn.title = t('copyTitle');
-      copyBtn.textContent = '📋';
-      copyBtn.addEventListener('click', (e) => {
-        stopBubble(e);
-        callbacks.onCopy();
-      });
-      pill.appendChild(copyBtn);
-
-      const dlBtn = document.createElement('button');
-      dlBtn.type = 'button';
-      dlBtn.className = 'xas-btn';
-      dlBtn.title = t('downloadTitle');
-      dlBtn.textContent = '⬇';
-      dlBtn.addEventListener('click', (e) => {
-        stopBubble(e);
-        callbacks.onDownload();
-      });
-      pill.appendChild(dlBtn);
+      pill.appendChild(
+        makeIconButton({
+          icon: 'swap_horiz',
+          title: t('orderBtnTitle'),
+          active: state.showOrderEditor,
+          onClick: () => {
+            state.showOrderEditor = !state.showOrderEditor;
+            state.selectedSlot = null;
+            renderToolbar();
+          },
+        }),
+      );
+      pill.appendChild(
+        makeIconButton({
+          icon: 'zoom_in',
+          title: t('zoomTitle'),
+          onClick: callbacks.onOpenLightbox,
+        }),
+      );
+      pill.appendChild(
+        makeIconButton({
+          icon: 'content_copy',
+          title: t('copyTitle'),
+          onClick: callbacks.onCopy,
+        }),
+      );
+      pill.appendChild(
+        makeIconButton({
+          icon: 'download',
+          title: t('downloadTitle'),
+          onClick: callbacks.onDownload,
+        }),
+      );
     }
 
-    const gearBtn = document.createElement('button');
-    gearBtn.type = 'button';
-    gearBtn.className = 'xas-btn';
-    gearBtn.title = t('settingsTitle');
-    gearBtn.textContent = '⚙';
-    gearBtn.addEventListener('click', (e) => {
-      stopBubble(e);
-      callbacks.onOpenSettings();
-    });
-    pill.appendChild(gearBtn);
+    pill.appendChild(
+      makeIconButton({
+        icon: 'settings',
+        title: t('settingsTitle'),
+        onClick: callbacks.onOpenSettings,
+      }),
+    );
 
     toolbar.appendChild(pill);
 
@@ -676,7 +693,7 @@ export function createGalleryUI(gallery, callbacks) {
       const autoOrderBtn = document.createElement('button');
       autoOrderBtn.type = 'button';
       autoOrderBtn.className = 'xas-btn xas-btn-accent';
-      autoOrderBtn.textContent = t('autoOrder');
+      appendIconLabel(autoOrderBtn, 'auto_awesome', t('autoOrder'), 14);
       autoOrderBtn.addEventListener('click', (e) => {
         stopBubble(e);
         callbacks.onAutoSolve(state.activeLayout);
@@ -686,7 +703,7 @@ export function createGalleryUI(gallery, callbacks) {
       const resetOrderBtn = document.createElement('button');
       resetOrderBtn.type = 'button';
       resetOrderBtn.className = 'xas-btn';
-      resetOrderBtn.textContent = t('resetOrder');
+      appendIconLabel(resetOrderBtn, 'restart_alt', t('resetOrder'), 14);
       resetOrderBtn.addEventListener('click', (e) => {
         stopBubble(e);
         callbacks.onChangeOrder(Array.from({ length: urls.length }, (_, i) => i));
@@ -718,9 +735,15 @@ export function createGalleryUI(gallery, callbacks) {
       state.wasUnshuffled = Boolean(wasUnshuffled);
 
       previewImg.src = objectUrl;
+      metaBadge.textContent = '';
       const parts = [getLayoutLabel(layout), `${width}×${height}`];
-      if (state.wasUnshuffled) parts.unshift(t('unshuffledBadge'));
-      metaBadge.textContent = parts.join(' · ');
+      if (state.wasUnshuffled) {
+        metaBadge.appendChild(createIcon('auto_awesome', 14));
+        parts.unshift(t('unshuffledBadge'));
+      }
+      const metaText = document.createElement('span');
+      metaText.textContent = parts.join(' · ');
+      metaBadge.appendChild(metaText);
 
       stage.style.display = 'flex';
       container.classList.add('xas-active');

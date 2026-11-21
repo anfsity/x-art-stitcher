@@ -20,7 +20,7 @@ A zero-dependency userscript for **X (Twitter)** that automatically detects, uns
 1. Install [ScriptCat](https://docs.scriptcat.org/) (recommended on Firefox/Chrome), Violentmonkey, or Tampermonkey.
 2. Open the raw userscript URL to install with automatic updates:
    `https://raw.githubusercontent.com/anfsity/x-art-stitcher/main/dist/x-art-stitcher.user.js`
-3. Reload `x.com`. Configure options anytime from the ScriptCat menu (`X Art Stitcher Settings`) or the `⚙` icon on any multi-image tweet.
+3. Reload `x.com`. Configure options anytime from the ScriptCat menu (`X Art Stitcher Settings`) or the settings icon on any multi-image tweet.
 
 ## Development
 

@@ -1,3 +1,5 @@
+import { detectBorderArtifactDepth } from './detector.js';
+
 const MAX_CANVAS_EDGE = 16000;
 const MAX_CANVAS_PIXELS = 120_000_000;
 
@@ -9,128 +11,279 @@ function parseGridLayout(layout) {
 }
 
 /**
- * Compute pixel-accurate tile placement rectangles for the requested layout.
- * Preserves 1:1 native resolution whenever source dimensions align cleanly.
+ * Determine which sides of each ordered tile touch another tile inside the
+ * stitched layout. Only internal seam edges are eligible for border-line
+ * artifact trimming so outer borders of the artwork are always preserved.
  */
-export function computeLayoutPlan(images, layout, order) {
-  const ordered = order.map((idx) => images[idx]);
+function getInternalSeamSides(count, layout) {
+  const sides = Array.from({ length: count }, () => ({
+    left: false,
+    right: false,
+    top: false,
+    bottom: false,
+  }));
+
+  if (layout === 'horizontal') {
+    for (let i = 0; i < count; i++) {
+      if (i > 0) sides[i].left = true;
+      if (i + 1 < count) sides[i].right = true;
+    }
+    return sides;
+  }
+
+  if (layout === 'vertical') {
+    for (let i = 0; i < count; i++) {
+      if (i > 0) sides[i].top = true;
+      if (i + 1 < count) sides[i].bottom = true;
+    }
+    return sides;
+  }
+
+  if (layout === '3-left-tall' && count === 3) {
+    sides[0].right = true;
+    sides[1].left = true;
+    sides[1].bottom = true;
+    sides[2].left = true;
+    sides[2].top = true;
+    return sides;
+  }
+
+  if (layout === '3-right-tall' && count === 3) {
+    sides[0].right = true;
+    sides[0].bottom = true;
+    sides[1].right = true;
+    sides[1].top = true;
+    sides[2].left = true;
+    return sides;
+  }
+
+  if (layout === '3-top-wide' && count === 3) {
+    sides[0].bottom = true;
+    sides[1].top = true;
+    sides[1].right = true;
+    sides[2].top = true;
+    sides[2].left = true;
+    return sides;
+  }
+
+  if (layout === '3-bottom-wide' && count === 3) {
+    sides[0].bottom = true;
+    sides[0].right = true;
+    sides[1].bottom = true;
+    sides[1].left = true;
+    sides[2].top = true;
+    return sides;
+  }
+
+  const grid = parseGridLayout(layout);
+  if (grid && grid.rows * grid.cols === count) {
+    for (let r = 0; r < grid.rows; r++) {
+      for (let c = 0; c < grid.cols; c++) {
+        const idx = r * grid.cols + c;
+        if (c > 0) sides[idx].left = true;
+        if (c + 1 < grid.cols) sides[idx].right = true;
+        if (r > 0) sides[idx].top = true;
+        if (r + 1 < grid.rows) sides[idx].bottom = true;
+      }
+    }
+  }
+
+  return sides;
+}
+
+/**
+ * Sample a narrow strip from a decoded high-res image along one edge to detect
+ * exact pixel thickness of a uniform 1..maxTrim px border line artifact.
+ */
+function measureOrigBorderTrim(decodedImg, side, maxTrim = 6) {
+  if (!decodedImg?.source || typeof document === 'undefined') return 0;
+  const isHorizontalEdge = side === 'top' || side === 'bottom';
+  const depth = isHorizontalEdge ? decodedImg.height : decodedImg.width;
+  const edgeLen = isHorizontalEdge ? decodedImg.width : decodedImg.height;
+  const limit = Math.min(maxTrim, Math.floor((depth - 4) / 2));
+  if (limit < 1 || edgeLen < 16) return 0;
+
+  const band = limit + 3;
+  const sampleLen = Math.min(96, edgeLen);
+  const canvas = document.createElement('canvas');
+  canvas.width = isHorizontalEdge ? sampleLen : band;
+  canvas.height = isHorizontalEdge ? band : sampleLen;
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+
+  if (side === 'left') {
+    ctx.drawImage(decodedImg.source, 0, 0, band, decodedImg.height, 0, 0, band, sampleLen);
+  } else if (side === 'right') {
+    ctx.drawImage(
+      decodedImg.source,
+      decodedImg.width - band,
+      0,
+      band,
+      decodedImg.height,
+      0,
+      0,
+      band,
+      sampleLen,
+    );
+  } else if (side === 'top') {
+    ctx.drawImage(decodedImg.source, 0, 0, decodedImg.width, band, 0, 0, sampleLen, band);
+  } else {
+    ctx.drawImage(
+      decodedImg.source,
+      0,
+      decodedImg.height - band,
+      decodedImg.width,
+      band,
+      0,
+      0,
+      sampleLen,
+      band,
+    );
+  }
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return detectBorderArtifactDepth(
+    { width: canvas.width, height: canvas.height, data: imageData.data },
+    side,
+    limit,
+  );
+}
+
+function resolveTileCrop(img, trim) {
+  const left = Math.max(0, trim?.left || 0);
+  const right = Math.max(0, trim?.right || 0);
+  const top = Math.max(0, trim?.top || 0);
+  const bottom = Math.max(0, trim?.bottom || 0);
+  const sw = Math.max(1, img.width - left - right);
+  const sh = Math.max(1, img.height - top - bottom);
+  return { img, sx: left, sy: top, sw, sh };
+}
+
+/**
+ * Compute pixel-accurate tile placement rectangles for the requested layout.
+ * Preserves 1:1 native resolution whenever source dimensions align cleanly and
+ * honors optional per-tile internal seam trims.
+ */
+export function computeLayoutPlan(images, layout, order, orderedTrims = null) {
+  const tiles = order.map((idx, slotPos) =>
+    resolveTileCrop(images[idx], orderedTrims ? orderedTrims[slotPos] : null),
+  );
   const rects = [];
   let width = 0;
   let height = 0;
 
   if (layout === 'horizontal') {
-    height = Math.max(...ordered.map((img) => img.height));
+    height = Math.max(...tiles.map((t) => t.sh));
     let x = 0;
-    for (const img of ordered) {
-      const w = img.height === height ? img.width : Math.round((img.width * height) / img.height);
-      rects.push({ img, x, y: 0, w, h: height });
+    for (const tile of tiles) {
+      const w = tile.sh === height ? tile.sw : Math.round((tile.sw * height) / tile.sh);
+      rects.push({ ...tile, x, y: 0, w, h: height });
       x += w;
     }
     width = x;
   } else if (layout === 'vertical') {
-    width = Math.max(...ordered.map((img) => img.width));
+    width = Math.max(...tiles.map((t) => t.sw));
     let y = 0;
-    for (const img of ordered) {
-      const h = img.width === width ? img.height : Math.round((img.height * width) / img.width);
-      rects.push({ img, x: 0, y, w: width, h });
+    for (const tile of tiles) {
+      const h = tile.sw === width ? tile.sh : Math.round((tile.sh * width) / tile.sw);
+      rects.push({ ...tile, x: 0, y, w: width, h });
       y += h;
     }
     height = y;
-  } else if (layout === '3-left-tall' && ordered.length === 3) {
-    const [left, tr, br] = ordered;
-    const rightBaseW = Math.max(tr.width, br.width);
-    const trH0 = tr.width === rightBaseW ? tr.height : Math.round((tr.height * rightBaseW) / tr.width);
-    const brH0 = br.width === rightBaseW ? br.height : Math.round((br.height * rightBaseW) / br.width);
+  } else if (layout === '3-left-tall' && tiles.length === 3) {
+    const [left, tr, br] = tiles;
+    const rightBaseW = Math.max(tr.sw, br.sw);
+    const trH0 = tr.sw === rightBaseW ? tr.sh : Math.round((tr.sh * rightBaseW) / tr.sw);
+    const brH0 = br.sw === rightBaseW ? br.sh : Math.round((br.sh * rightBaseW) / br.sw);
     const rightTotalH0 = trH0 + brH0;
 
-    height = Math.max(left.height, rightTotalH0);
-    const leftScale = height / left.height;
+    height = Math.max(left.sh, rightTotalH0);
+    const leftScale = height / left.sh;
     const rightScale = height / rightTotalH0;
 
-    const leftW = leftScale === 1 ? left.width : Math.round(left.width * leftScale);
+    const leftW = leftScale === 1 ? left.sw : Math.round(left.sw * leftScale);
     const rightW = rightScale === 1 ? rightBaseW : Math.round(rightBaseW * rightScale);
     const trH = rightScale === 1 ? trH0 : Math.round(trH0 * rightScale);
     const brH = height - trH;
 
-    rects.push({ img: left, x: 0, y: 0, w: leftW, h: height });
-    rects.push({ img: tr, x: leftW, y: 0, w: rightW, h: trH });
-    rects.push({ img: br, x: leftW, y: trH, w: rightW, h: brH });
+    rects.push({ ...left, x: 0, y: 0, w: leftW, h: height });
+    rects.push({ ...tr, x: leftW, y: 0, w: rightW, h: trH });
+    rects.push({ ...br, x: leftW, y: trH, w: rightW, h: brH });
     width = leftW + rightW;
-  } else if (layout === '3-right-tall' && ordered.length === 3) {
-    const [tl, bl, right] = ordered;
-    const leftBaseW = Math.max(tl.width, bl.width);
-    const tlH0 = tl.width === leftBaseW ? tl.height : Math.round((tl.height * leftBaseW) / tl.width);
-    const blH0 = bl.width === leftBaseW ? bl.height : Math.round((bl.height * leftBaseW) / bl.width);
+  } else if (layout === '3-right-tall' && tiles.length === 3) {
+    const [tl, bl, right] = tiles;
+    const leftBaseW = Math.max(tl.sw, bl.sw);
+    const tlH0 = tl.sw === leftBaseW ? tl.sh : Math.round((tl.sh * leftBaseW) / tl.sw);
+    const blH0 = bl.sw === leftBaseW ? bl.sh : Math.round((bl.sh * leftBaseW) / bl.sw);
     const leftTotalH0 = tlH0 + blH0;
 
-    height = Math.max(right.height, leftTotalH0);
+    height = Math.max(right.sh, leftTotalH0);
     const leftScale = height / leftTotalH0;
-    const rightScale = height / right.height;
+    const rightScale = height / right.sh;
 
     const leftW = leftScale === 1 ? leftBaseW : Math.round(leftBaseW * leftScale);
-    const rightW = rightScale === 1 ? right.width : Math.round(right.width * rightScale);
+    const rightW = rightScale === 1 ? right.sw : Math.round(right.sw * rightScale);
     const tlH = leftScale === 1 ? tlH0 : Math.round(tlH0 * leftScale);
     const blH = height - tlH;
 
-    rects.push({ img: tl, x: 0, y: 0, w: leftW, h: tlH });
-    rects.push({ img: bl, x: 0, y: tlH, w: leftW, h: blH });
-    rects.push({ img: right, x: leftW, y: 0, w: rightW, h: height });
+    rects.push({ ...tl, x: 0, y: 0, w: leftW, h: tlH });
+    rects.push({ ...bl, x: 0, y: tlH, w: leftW, h: blH });
+    rects.push({ ...right, x: leftW, y: 0, w: rightW, h: height });
     width = leftW + rightW;
-  } else if (layout === '3-top-wide' && ordered.length === 3) {
-    const [top, bl, br] = ordered;
-    const botBaseH = Math.max(bl.height, br.height);
-    const blW0 = bl.height === botBaseH ? bl.width : Math.round((bl.width * botBaseH) / bl.height);
-    const brW0 = br.height === botBaseH ? br.width : Math.round((br.width * botBaseH) / br.height);
+  } else if (layout === '3-top-wide' && tiles.length === 3) {
+    const [top, bl, br] = tiles;
+    const botBaseH = Math.max(bl.sh, br.sh);
+    const blW0 = bl.sh === botBaseH ? bl.sw : Math.round((bl.sw * botBaseH) / bl.sh);
+    const brW0 = br.sh === botBaseH ? br.sw : Math.round((br.sw * botBaseH) / br.sh);
     const botTotalW0 = blW0 + brW0;
 
-    width = Math.max(top.width, botTotalW0);
-    const topScale = width / top.width;
+    width = Math.max(top.sw, botTotalW0);
+    const topScale = width / top.sw;
     const botScale = width / botTotalW0;
 
-    const topH = topScale === 1 ? top.height : Math.round(top.height * topScale);
+    const topH = topScale === 1 ? top.sh : Math.round(top.sh * topScale);
     const botH = botScale === 1 ? botBaseH : Math.round(botBaseH * botScale);
     const blW = botScale === 1 ? blW0 : Math.round(blW0 * botScale);
     const brW = width - blW;
 
-    rects.push({ img: top, x: 0, y: 0, w: width, h: topH });
-    rects.push({ img: bl, x: 0, y: topH, w: blW, h: botH });
-    rects.push({ img: br, x: blW, y: topH, w: brW, h: botH });
+    rects.push({ ...top, x: 0, y: 0, w: width, h: topH });
+    rects.push({ ...bl, x: 0, y: topH, w: blW, h: botH });
+    rects.push({ ...br, x: blW, y: topH, w: brW, h: botH });
     height = topH + botH;
-  } else if (layout === '3-bottom-wide' && ordered.length === 3) {
-    const [tl, tr, bottom] = ordered;
-    const topBaseH = Math.max(tl.height, tr.height);
-    const tlW0 = tl.height === topBaseH ? tl.width : Math.round((tl.width * topBaseH) / tl.height);
-    const trW0 = tr.height === topBaseH ? tr.width : Math.round((tr.width * topBaseH) / tr.height);
+  } else if (layout === '3-bottom-wide' && tiles.length === 3) {
+    const [tl, tr, bottom] = tiles;
+    const topBaseH = Math.max(tl.sh, tr.sh);
+    const tlW0 = tl.sh === topBaseH ? tl.sw : Math.round((tl.sw * topBaseH) / tl.sh);
+    const trW0 = tr.sh === topBaseH ? tr.sw : Math.round((tr.sw * topBaseH) / tr.sh);
     const topTotalW0 = tlW0 + trW0;
 
-    width = Math.max(bottom.width, topTotalW0);
+    width = Math.max(bottom.sw, topTotalW0);
     const topScale = width / topTotalW0;
-    const botScale = width / bottom.width;
+    const botScale = width / bottom.sw;
 
     const topH = topScale === 1 ? topBaseH : Math.round(topBaseH * topScale);
-    const botH = botScale === 1 ? bottom.height : Math.round(bottom.height * botScale);
+    const botH = botScale === 1 ? bottom.sh : Math.round(bottom.sh * botScale);
     const tlW = topScale === 1 ? tlW0 : Math.round(tlW0 * topScale);
     const trW = width - tlW;
 
-    rects.push({ img: tl, x: 0, y: 0, w: tlW, h: topH });
-    rects.push({ img: tr, x: tlW, y: 0, w: trW, h: topH });
-    rects.push({ img: bottom, x: 0, y: topH, w: width, h: botH });
+    rects.push({ ...tl, x: 0, y: 0, w: tlW, h: topH });
+    rects.push({ ...tr, x: tlW, y: 0, w: trW, h: topH });
+    rects.push({ ...bottom, x: 0, y: topH, w: width, h: botH });
     height = topH + botH;
   } else {
     const grid = parseGridLayout(layout);
-    if (!grid || grid.rows * grid.cols !== ordered.length) {
-      return computeLayoutPlan(images, 'vertical', order);
+    if (!grid || grid.rows * grid.cols !== tiles.length) {
+      return computeLayoutPlan(images, 'vertical', order, orderedTrims);
     }
 
     const rowInfos = [];
     for (let r = 0; r < grid.rows; r++) {
-      const rowImgs = ordered.slice(r * grid.cols, (r + 1) * grid.cols);
-      const rowH = Math.max(...rowImgs.map((img) => img.height));
-      const widths = rowImgs.map((img) =>
-        img.height === rowH ? img.width : Math.round((img.width * rowH) / img.height),
-      );
+      const rowTiles = tiles.slice(r * grid.cols, (r + 1) * grid.cols);
+      const rowH = Math.max(...rowTiles.map((t) => t.sh));
+      const widths = rowTiles.map((t) => (t.sh === rowH ? t.sw : Math.round((t.sw * rowH) / t.sh)));
       const totalW = widths.reduce((acc, w) => acc + w, 0);
-      rowInfos.push({ rowImgs, rowH, widths, totalW });
+      rowInfos.push({ rowTiles, rowH, widths, totalW });
     }
 
     width = Math.max(...rowInfos.map((info) => info.totalW));
@@ -139,10 +292,10 @@ export function computeLayoutPlan(images, layout, order) {
       const scale = width / info.totalW;
       const scaledH = scale === 1 ? info.rowH : Math.round(info.rowH * scale);
       let x = 0;
-      for (let c = 0; c < info.rowImgs.length; c++) {
-        const isLast = c === info.rowImgs.length - 1;
+      for (let c = 0; c < info.rowTiles.length; c++) {
+        const isLast = c === info.rowTiles.length - 1;
         const scaledW = isLast ? width - x : scale === 1 ? info.widths[c] : Math.round(info.widths[c] * scale);
-        rects.push({ img: info.rowImgs[c], x, y, w: scaledW, h: scaledH });
+        rects.push({ ...info.rowTiles[c], x, y, w: scaledW, h: scaledH });
         x += scaledW;
       }
       y += scaledH;
@@ -172,8 +325,23 @@ export function computeLayoutPlan(images, layout, order) {
   return { width, height, rects, downscale };
 }
 
-export function renderStitchedCanvas(decodedImages, layout, order) {
-  const plan = computeLayoutPlan(decodedImages, layout, order);
+export function renderStitchedCanvas(decodedImages, layout, order, { autoTrimBorders = true } = {}) {
+  let orderedTrims = null;
+  if (autoTrimBorders) {
+    const seamSides = getInternalSeamSides(order.length, layout);
+    orderedTrims = order.map((imgIdx, slotPos) => {
+      const img = decodedImages[imgIdx];
+      const mask = seamSides[slotPos];
+      return {
+        left: mask.left ? measureOrigBorderTrim(img, 'left') : 0,
+        right: mask.right ? measureOrigBorderTrim(img, 'right') : 0,
+        top: mask.top ? measureOrigBorderTrim(img, 'top') : 0,
+        bottom: mask.bottom ? measureOrigBorderTrim(img, 'bottom') : 0,
+      };
+    });
+  }
+
+  const plan = computeLayoutPlan(decodedImages, layout, order, orderedTrims);
   const canvas = document.createElement('canvas');
   canvas.width = plan.width;
   canvas.height = plan.height;
@@ -183,7 +351,7 @@ export function renderStitchedCanvas(decodedImages, layout, order) {
   ctx.imageSmoothingQuality = 'high';
 
   for (const rect of plan.rects) {
-    ctx.drawImage(rect.img.source, rect.x, rect.y, rect.w, rect.h);
+    ctx.drawImage(rect.img.source, rect.sx, rect.sy, rect.sw, rect.sh, rect.x, rect.y, rect.w, rect.h);
   }
 
   return { canvas, width: plan.width, height: plan.height };

@@ -673,10 +673,114 @@
   }
 
   /**
+   * Detect a uniform 1..maxTrim px dark/light border artifact line (e.g. from a
+   * screenshot crop or canvas slice guide) along an image edge. Returns 0 when
+   * the edge transitions normally into interior pixels.
+   */
+  function detectBorderArtifactDepth(img, side, maxTrim = 2) {
+    const isHorizontalEdge = side === 'top' || side === 'bottom';
+    const edgeLen = isHorizontalEdge ? img.width : img.height;
+    const depth = isHorizontalEdge ? img.height : img.width;
+    const limit = Math.min(maxTrim, Math.floor((depth - 4) / 2));
+    if (limit < 1 || edgeLen < 12) return 0;
+
+    const sampleCount = Math.min(64, Math.max(16, edgeLen - 2));
+    const margin = Math.max(0, Math.floor(edgeLen * 0.04));
+    const span = Math.max(1, edgeLen - margin * 2 - 1);
+    const rows = Array.from({ length: limit + 3 }, () => new Float32Array(sampleCount * 3));
+
+    for (let d = 0; d < limit + 3; d++) {
+      const coord = side === 'top' || side === 'left' ? d : depth - 1 - d;
+      const buf = rows[d];
+      for (let k = 0; k < sampleCount; k++) {
+        const p = Math.min(edgeLen - 1, margin + Math.round((k / Math.max(1, sampleCount - 1)) * span));
+        const px = isHorizontalEdge ? samplePixelRgb(img, p, coord) : samplePixelRgb(img, coord, p);
+        const base = k * 3;
+        buf[base] = px[0];
+        buf[base + 1] = px[1];
+        buf[base + 2] = px[2];
+      }
+    }
+
+    // Scan from innermost candidate depth outward so anti-aliased multi-pixel
+    // border lines trim cleanly up to the first calm interior row/column.
+    for (let t = limit; t >= 1; t--) {
+      const outBuf = rows[t - 1];
+      const inBuf = rows[t];
+      const nextBuf = rows[t + 1];
+      const next2Buf = rows[t + 2];
+
+      let sumOut = 0;
+      let sumIn = 0;
+      let sumIn2 = 0;
+      let strongCount = 0;
+      let darkerCount = 0;
+      let brighterCount = 0;
+
+      for (let k = 0; k < sampleCount; k++) {
+        const base = k * 3;
+        const dOut =
+          (Math.abs(outBuf[base] - inBuf[base]) +
+            Math.abs(outBuf[base + 1] - inBuf[base + 1]) +
+            Math.abs(outBuf[base + 2] - inBuf[base + 2])) /
+          3;
+        const dIn =
+          (Math.abs(inBuf[base] - nextBuf[base]) +
+            Math.abs(inBuf[base + 1] - nextBuf[base + 1]) +
+            Math.abs(inBuf[base + 2] - nextBuf[base + 2])) /
+          3;
+        const dIn2 =
+          (Math.abs(nextBuf[base] - next2Buf[base]) +
+            Math.abs(nextBuf[base + 1] - next2Buf[base + 1]) +
+            Math.abs(nextBuf[base + 2] - next2Buf[base + 2])) /
+          3;
+
+        sumOut += dOut;
+        sumIn += dIn;
+        sumIn2 += dIn2;
+
+        if (dOut >= 16 && dOut > dIn * 2.0 + 6) {
+          strongCount++;
+          const lumaOut = outBuf[base] + outBuf[base + 1] + outBuf[base + 2];
+          const lumaIn = inBuf[base] + inBuf[base + 1] + inBuf[base + 2];
+          if (lumaOut < lumaIn) darkerCount++;
+          else brighterCount++;
+        }
+      }
+
+      const meanOut = sumOut / sampleCount;
+      const meanIn = sumIn / sampleCount;
+      const meanIn2 = sumIn2 / sampleCount;
+      const fracStrong = strongCount / sampleCount;
+      const signConsistency = strongCount > 0 ? Math.max(darkerCount, brighterCount) / strongCount : 0;
+
+      if (
+        meanOut >= 18 &&
+        meanIn <= 30 &&
+        meanOut / (meanIn + 1.0) >= 3.0 &&
+        meanOut / (Math.min(meanIn, meanIn2) + 1.0) >= 3.0 &&
+        fracStrong >= 0.65 &&
+        signConsistency >= 0.75
+      ) {
+        return t;
+      }
+    }
+
+    return 0;
+  }
+
+  /**
    * Extract an edge strip (outer blended border + inner 2px inset) resampled via
    * box-filter averaging so thin line art crossing a cut is preserved.
    */
-  function extractEdgeStrip(img, side, startFrac = 0, endFrac = 1, samples = DEFAULT_SAMPLES) {
+  function extractEdgeStrip(
+    img,
+    side,
+    startFrac = 0,
+    endFrac = 1,
+    samples = DEFAULT_SAMPLES,
+    inset = 0,
+  ) {
     const isHorizontalEdge = side === 'top' || side === 'bottom';
     const totalLen = isHorizontalEdge ? img.width : img.height;
     const depth = isHorizontalEdge ? img.height : img.width;
@@ -688,9 +792,16 @@
     const outer = new Float32Array(samples * 3);
     const inner = new Float32Array(samples * 3);
 
-    const d0 = side === 'top' || side === 'left' ? 0 : depth - 1;
-    const d1 = side === 'top' || side === 'left' ? Math.min(1, depth - 1) : Math.max(0, depth - 2);
-    const d2 = side === 'top' || side === 'left' ? Math.min(2, depth - 1) : Math.max(0, depth - 3);
+    const clampedInset = Math.max(0, Math.min(Math.max(0, depth - 3), inset));
+    const d0 = side === 'top' || side === 'left' ? clampedInset : depth - 1 - clampedInset;
+    const d1 =
+      side === 'top' || side === 'left'
+        ? Math.min(depth - 1, clampedInset + 1)
+        : Math.max(0, depth - 2 - clampedInset);
+    const d2 =
+      side === 'top' || side === 'left'
+        ? Math.min(depth - 1, clampedInset + 2)
+        : Math.max(0, depth - 3 - clampedInset);
 
     for (let k = 0; k < samples; k++) {
       let or = 0;
@@ -759,7 +870,7 @@
       inner[base + 2] = ib;
     }
 
-    return { outer, inner, samples };
+    return { outer, inner, samples, inset: clampedInset };
   }
 
   function rmsRgb(r1, g1, b1, r2, g2, b2) {
@@ -944,6 +1055,31 @@
     };
   }
 
+  /**
+   * Score an edge pair using raw borders, and if either side exhibited a uniform
+   * border-line artifact, re-evaluate with the trimmed edge and keep the cleaner
+   * match only when it materially improves continuity.
+   */
+  function scoreEdgeEntryPair(entryA, entryB, minActivity) {
+    let best = scoreEdgePair(entryA.raw, entryB.raw, minActivity);
+    const altA = entryA.trimmed;
+    const altB = entryB.trimmed;
+    if (!altA && !altB) return best;
+
+    const pairs = [];
+    if (altA) pairs.push([altA, entryB.raw]);
+    if (altB) pairs.push([entryA.raw, altB]);
+    if (altA && altB) pairs.push([altA, altB]);
+
+    for (const [sa, sb] of pairs) {
+      const cand = scoreEdgePair(sa, sb, minActivity);
+      if (cand.score > best.score + 0.04) {
+        best = cand;
+      }
+    }
+    return best;
+  }
+
   function getPermutations(n) {
     const result = [];
     const arr = Array.from({ length: n }, (_, i) => i);
@@ -1099,18 +1235,239 @@
     return Math.exp(-Math.max(0, maxErr - 0.03) * 3.5);
   }
 
+  function isMutualBestBuddy(i, j, matrix) {
+    const target = matrix[i][j].score;
+    const n = matrix.length;
+    for (let k = 0; k < n; k++) {
+      if (k !== i && k !== j && matrix[i][k].score > target + 0.01) return false;
+      if (k !== i && k !== j && matrix[k][j].score > target + 0.01) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Segment a mixed multi-image carousel (e.g. a 4-slice panorama followed by
+   * standalone artworks, or multiple split artworks in one tweet) into optimal
+   * non-overlapping stitched groups and standalone slides.
+   */
+  function detectPartialSplitGroups(n, H, V, aspects, options) {
+    const { minComposite, minSeam, minActivity, allowUnshuffle, unshuffleMargin } = options;
+    const validIntervals = [];
+
+    // 1. Evaluate every contiguous horizontal and vertical sub-run [start..end].
+    const evalStripIntervals = (layout, matrix) => {
+      for (let start = 0; start < n - 1; start++) {
+        for (let end = start + 1; end < n; end++) {
+          const len = end - start + 1;
+          if (len >= n) continue;
+
+          const seams = [];
+          for (let k = start; k < end; k++) {
+            seams.push(matrix[k][k + 1]);
+          }
+
+          // Never extend a partial group across an inactive flat-color boundary
+          // (prevents swallowing an adjacent white-background standalone image).
+          if (!seams[0].isActive || !seams[seams.length - 1].isActive) continue;
+
+          const localOrder = Array.from({ length: len }, (_, i) => i);
+          const cand = aggregateCandidate(layout, localOrder, seams, 1.0, minActivity);
+          if (!cand) continue;
+
+          if (len === 2) {
+            // Single-seam pairs inside a larger gallery face the birthday paradox:
+            // enforce high structural agreement + mutual-best-buddy confirmation.
+            const seam = seams[0];
+            const pairMinScore = Math.min(0.86, minComposite + 0.14);
+            if (
+              cand.composite < pairMinScore ||
+              seam.ncc < 0.65 ||
+              seam.gradNcc < 0.30 ||
+              !isMutualBestBuddy(start, end, matrix)
+            ) {
+              continue;
+            }
+          } else {
+            const strongSingleActive =
+              len === 3 && cand.activeCount === 1 && cand.activeMeanScore >= minComposite + 0.14 && cand.minSeamScore >= 0.55;
+            if (
+              cand.composite < minComposite ||
+              cand.minSeamScore < minSeam ||
+              (cand.activeCount < 2 && !strongSingleActive)
+            ) {
+              continue;
+            }
+          }
+
+          const indices = Array.from({ length: len }, (_, i) => start + i);
+          validIntervals.push({
+            start,
+            end,
+            len,
+            indices,
+            layout,
+            order: localOrder,
+            wasUnshuffled: false,
+            candidate: cand,
+            weight: (len - 1) * cand.composite,
+          });
+        }
+      }
+    };
+
+    evalStripIntervals('horizontal', H);
+    evalStripIntervals('vertical', V);
+
+    // 2. Evaluate contiguous 4-slice 2x2 sub-blocks inside larger galleries (N >= 5).
+    if (n >= 5) {
+      const perms4 = allowUnshuffle ? getPermutations(4) : [[0, 1, 2, 3]];
+      for (let start = 0; start <= n - 4; start++) {
+        const indices = [start, start + 1, start + 2, start + 3];
+        const subAspects = indices.map((idx) => aspects[idx]);
+        let bestNat = null;
+        let bestAny = null;
+
+        for (const localOrder of perms4) {
+          const geomScore = computeGridGeomScore(2, 2, localOrder, subAspects);
+          if (geomScore <= 0) continue;
+          const [tl, tr, bl, br] = localOrder.map((k) => indices[k]);
+          const seams = [H[tl][tr], H[bl][br], V[tl][bl], V[tr][br]];
+          const cand = aggregateCandidate('grid-2x2', localOrder, seams, geomScore, minActivity);
+          if (!cand) continue;
+          if (!bestAny || cand.composite > bestAny.composite) bestAny = cand;
+          if (isNaturalOrder(localOrder) && (!bestNat || cand.composite > bestNat.composite)) {
+            bestNat = cand;
+          }
+        }
+
+        let picked = bestNat;
+        let unshuffled = false;
+        if (allowUnshuffle && bestAny) {
+          if (!bestNat) {
+            picked = bestAny;
+            unshuffled = !isNaturalOrder(bestAny.order);
+          } else if (!isNaturalOrder(bestAny.order) && bestAny.composite >= bestNat.composite + unshuffleMargin) {
+            picked = bestAny;
+            unshuffled = true;
+          }
+        }
+
+        if (
+          picked &&
+          picked.composite >= minComposite &&
+          picked.minSeamScore >= minSeam &&
+          picked.activeCount >= 2
+        ) {
+          validIntervals.push({
+            start,
+            end: start + 3,
+            len: 4,
+            indices,
+            layout: 'grid-2x2',
+            order: picked.order,
+            wasUnshuffled: unshuffled,
+            candidate: picked,
+            // Slightly favor 2x2 over a 1x4 strip on the same 4 indices when scores tie,
+            // because 4 matching seams carry stronger structural evidence than 3.
+            weight: 3.25 * picked.composite,
+          });
+        }
+      }
+    }
+
+    if (validIntervals.length === 0) return null;
+
+    // Keep only the strongest candidate per (start, end) span before interval DP.
+    const bySpan = new Map();
+    for (const interval of validIntervals) {
+      const key = `${interval.start}:${interval.end}`;
+      const prev = bySpan.get(key);
+      if (!prev || interval.weight > prev.weight) {
+        bySpan.set(key, interval);
+      }
+    }
+
+    const intervalsByEnd = Array.from({ length: n }, () => []);
+    for (const interval of bySpan.values()) {
+      intervalsByEnd[interval.end].push(interval);
+    }
+
+    // Exact 1D weighted interval scheduling DP over 0..n-1.
+    const dpWeight = new Float64Array(n + 1);
+    const dpChoice = new Array(n + 1).fill(null);
+
+    for (let i = 0; i < n; i++) {
+      // Option A: leave image i as a standalone single.
+      dpWeight[i + 1] = dpWeight[i];
+      dpChoice[i + 1] = null;
+
+      // Option B: end a split group at image i.
+      for (const interval of intervalsByEnd[i]) {
+        const w = dpWeight[interval.start] + interval.weight;
+        if (w > dpWeight[i + 1] + 1e-9) {
+          dpWeight[i + 1] = w;
+          dpChoice[i + 1] = interval;
+        }
+      }
+    }
+
+    if (dpWeight[n] <= 0) return null;
+
+    const selected = [];
+    let cursor = n;
+    while (cursor > 0) {
+      const chosen = dpChoice[cursor];
+      if (chosen) {
+        selected.push(chosen);
+        cursor = chosen.start;
+      } else {
+        cursor--;
+      }
+    }
+    selected.reverse();
+    if (selected.length === 0) return null;
+
+    // Assemble the full ordered gallery sequence (stitched groups + remaining singles).
+    const galleryItems = [];
+    let idx = 0;
+    for (const grp of selected) {
+      while (idx < grp.start) {
+        galleryItems.push({ type: 'single', index: idx });
+        idx++;
+      }
+      galleryItems.push({
+        type: 'stitched',
+        indices: grp.indices,
+        layout: grp.layout,
+        order: grp.order,
+        wasUnshuffled: grp.wasUnshuffled,
+        candidate: grp.candidate,
+      });
+      idx = grp.end + 1;
+    }
+    while (idx < n) {
+      galleryItems.push({ type: 'single', index: idx });
+      idx++;
+    }
+
+    return galleryItems;
+  }
+
   /**
    * Analyze N decoded thumbnail RGBA buffers and determine whether they form a
-   * split artwork, along with the optimal layout and unshuffled tile order.
+   * split artwork (either across the full gallery or as partial split group(s)
+   * inside a mixed carousel), along with optimal layouts and unshuffled tile order.
    */
   function detectSplitArtwork(images, options = {}) {
     const n = images.length;
     if (n < 2) {
       return {
         isMatch: false,
+        isPartial: false,
         winner: null,
         wasUnshuffled: false,
         bestByLayout: {},
+        groups: [],
       };
     }
 
@@ -1120,11 +1477,18 @@
     const unshuffleMargin = options.unshuffleMargin ?? 0.10;
     const allowUnshuffle = options.allowUnshuffle ?? true;
 
+    const buildEdgeEntry = (img, side) => {
+      const raw = extractEdgeStrip(img, side);
+      const borderDepth = detectBorderArtifactDepth(img, side, 2);
+      const trimmed = borderDepth > 0 ? extractEdgeStrip(img, side, 0, 1, DEFAULT_SAMPLES, borderDepth) : null;
+      return { raw, trimmed, borderDepth };
+    };
+
     const fullEdges = images.map((img) => ({
-      top: extractEdgeStrip(img, 'top'),
-      bottom: extractEdgeStrip(img, 'bottom'),
-      left: extractEdgeStrip(img, 'left'),
-      right: extractEdgeStrip(img, 'right'),
+      top: buildEdgeEntry(img, 'top'),
+      bottom: buildEdgeEntry(img, 'bottom'),
+      left: buildEdgeEntry(img, 'left'),
+      right: buildEdgeEntry(img, 'right'),
     }));
 
     const aspects = images.map(getAspect);
@@ -1135,8 +1499,8 @@
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < n; j++) {
         if (i === j) continue;
-        H[i][j] = scoreEdgePair(fullEdges[i].right, fullEdges[j].left, minActivity);
-        V[i][j] = scoreEdgePair(fullEdges[i].bottom, fullEdges[j].top, minActivity);
+        H[i][j] = scoreEdgeEntryPair(fullEdges[i].right, fullEdges[j].left, minActivity);
+        V[i][j] = scoreEdgeEntryPair(fullEdges[i].bottom, fullEdges[j].top, minActivity);
       }
     }
 
@@ -1165,12 +1529,18 @@
         const subEdgeCache = new Map();
         const getSubEdge = (imgIdx, side, startFrac, endFrac) => {
           const key = `${imgIdx}:${side}:${startFrac.toFixed(4)}:${endFrac.toFixed(4)}`;
-          let strip = subEdgeCache.get(key);
-          if (!strip) {
-            strip = extractEdgeStrip(images[imgIdx], side, startFrac, endFrac);
-            subEdgeCache.set(key, strip);
+          let entry = subEdgeCache.get(key);
+          if (!entry) {
+            const borderDepth = fullEdges[imgIdx][side].borderDepth;
+            const raw = extractEdgeStrip(images[imgIdx], side, startFrac, endFrac);
+            const trimmed =
+              borderDepth > 0
+                ? extractEdgeStrip(images[imgIdx], side, startFrac, endFrac, DEFAULT_SAMPLES, borderDepth)
+                : null;
+            entry = { raw, trimmed, borderDepth };
+            subEdgeCache.set(key, entry);
           }
-          return strip;
+          return entry;
         };
 
         for (const order of perms) {
@@ -1185,8 +1555,8 @@
               const leftBot = getSubEdge(left, 'right', splitFrac, 1);
               const seams = [
                 V[tr][br],
-                scoreEdgePair(leftTop, fullEdges[tr].left, minActivity),
-                scoreEdgePair(leftBot, fullEdges[br].left, minActivity),
+                scoreEdgeEntryPair(leftTop, fullEdges[tr].left, minActivity),
+                scoreEdgeEntryPair(leftBot, fullEdges[br].left, minActivity),
               ];
               pushCandidate(aggregateCandidate('3-left-tall', order, seams, 1.0, minActivity));
             }
@@ -1203,8 +1573,8 @@
               const rightBot = getSubEdge(right, 'left', splitFrac, 1);
               const seams = [
                 V[tl][bl],
-                scoreEdgePair(fullEdges[tl].right, rightTop, minActivity),
-                scoreEdgePair(fullEdges[bl].right, rightBot, minActivity),
+                scoreEdgeEntryPair(fullEdges[tl].right, rightTop, minActivity),
+                scoreEdgeEntryPair(fullEdges[bl].right, rightBot, minActivity),
               ];
               pushCandidate(aggregateCandidate('3-right-tall', order, seams, 1.0, minActivity));
             }
@@ -1219,8 +1589,8 @@
               const topRight = getSubEdge(top, 'bottom', splitFrac, 1);
               const seams = [
                 H[bl][br],
-                scoreEdgePair(topLeft, fullEdges[bl].top, minActivity),
-                scoreEdgePair(topRight, fullEdges[br].top, minActivity),
+                scoreEdgeEntryPair(topLeft, fullEdges[bl].top, minActivity),
+                scoreEdgeEntryPair(topRight, fullEdges[br].top, minActivity),
               ];
               pushCandidate(aggregateCandidate('3-top-wide', order, seams, 1.0, minActivity));
             }
@@ -1235,8 +1605,8 @@
               const botRight = getSubEdge(bottom, 'top', splitFrac, 1);
               const seams = [
                 H[tl][tr],
-                scoreEdgePair(fullEdges[tl].bottom, botLeft, minActivity),
-                scoreEdgePair(fullEdges[tr].bottom, botRight, minActivity),
+                scoreEdgeEntryPair(fullEdges[tl].bottom, botLeft, minActivity),
+                scoreEdgeEntryPair(fullEdges[tr].bottom, botRight, minActivity),
               ];
               pushCandidate(aggregateCandidate('3-bottom-wide', order, seams, 1.0, minActivity));
             }
@@ -1328,18 +1698,62 @@
     }
 
     const requiredActiveSeams = winner && winner.seams.length >= 4 ? 2 : 1;
-    const isMatch = Boolean(
+    const isFullMatch = Boolean(
       winner &&
         winner.composite >= minComposite &&
         winner.minSeamScore >= minSeam &&
         winner.activeCount >= requiredActiveSeams,
     );
 
+    if (isFullMatch) {
+      const fullGroup = {
+        type: 'stitched',
+        indices: Array.from({ length: n }, (_, i) => i),
+        layout: winner.layout,
+        order: winner.order,
+        wasUnshuffled,
+        candidate: winner,
+      };
+      return {
+        isMatch: true,
+        isPartial: false,
+        winner,
+        wasUnshuffled,
+        bestByLayout,
+        groups: [fullGroup],
+      };
+    }
+
+    // Full-gallery stitch did not match: search for partial split group(s) inside
+    // mixed carousels (e.g. a 4-slice panorama followed by standalone artworks).
+    if (n >= 3) {
+      const partialGroups = detectPartialSplitGroups(n, H, V, aspects, {
+        minComposite,
+        minSeam,
+        minActivity,
+        allowUnshuffle,
+        unshuffleMargin,
+      });
+      if (partialGroups) {
+        const primaryGroup = partialGroups.find((item) => item.type === 'stitched') || null;
+        return {
+          isMatch: true,
+          isPartial: true,
+          winner: primaryGroup ? primaryGroup.candidate : winner,
+          wasUnshuffled: Boolean(primaryGroup?.wasUnshuffled),
+          bestByLayout,
+          groups: partialGroups,
+        };
+      }
+    }
+
     return {
-      isMatch,
+      isMatch: false,
+      isPartial: false,
       winner,
-      wasUnshuffled: isMatch && wasUnshuffled,
+      wasUnshuffled: false,
       bestByLayout,
+      groups: [],
     };
   }
 
@@ -1355,128 +1769,279 @@
   }
 
   /**
-   * Compute pixel-accurate tile placement rectangles for the requested layout.
-   * Preserves 1:1 native resolution whenever source dimensions align cleanly.
+   * Determine which sides of each ordered tile touch another tile inside the
+   * stitched layout. Only internal seam edges are eligible for border-line
+   * artifact trimming so outer borders of the artwork are always preserved.
    */
-  function computeLayoutPlan(images, layout, order) {
-    const ordered = order.map((idx) => images[idx]);
+  function getInternalSeamSides(count, layout) {
+    const sides = Array.from({ length: count }, () => ({
+      left: false,
+      right: false,
+      top: false,
+      bottom: false,
+    }));
+
+    if (layout === 'horizontal') {
+      for (let i = 0; i < count; i++) {
+        if (i > 0) sides[i].left = true;
+        if (i + 1 < count) sides[i].right = true;
+      }
+      return sides;
+    }
+
+    if (layout === 'vertical') {
+      for (let i = 0; i < count; i++) {
+        if (i > 0) sides[i].top = true;
+        if (i + 1 < count) sides[i].bottom = true;
+      }
+      return sides;
+    }
+
+    if (layout === '3-left-tall' && count === 3) {
+      sides[0].right = true;
+      sides[1].left = true;
+      sides[1].bottom = true;
+      sides[2].left = true;
+      sides[2].top = true;
+      return sides;
+    }
+
+    if (layout === '3-right-tall' && count === 3) {
+      sides[0].right = true;
+      sides[0].bottom = true;
+      sides[1].right = true;
+      sides[1].top = true;
+      sides[2].left = true;
+      return sides;
+    }
+
+    if (layout === '3-top-wide' && count === 3) {
+      sides[0].bottom = true;
+      sides[1].top = true;
+      sides[1].right = true;
+      sides[2].top = true;
+      sides[2].left = true;
+      return sides;
+    }
+
+    if (layout === '3-bottom-wide' && count === 3) {
+      sides[0].bottom = true;
+      sides[0].right = true;
+      sides[1].bottom = true;
+      sides[1].left = true;
+      sides[2].top = true;
+      return sides;
+    }
+
+    const grid = parseGridLayout(layout);
+    if (grid && grid.rows * grid.cols === count) {
+      for (let r = 0; r < grid.rows; r++) {
+        for (let c = 0; c < grid.cols; c++) {
+          const idx = r * grid.cols + c;
+          if (c > 0) sides[idx].left = true;
+          if (c + 1 < grid.cols) sides[idx].right = true;
+          if (r > 0) sides[idx].top = true;
+          if (r + 1 < grid.rows) sides[idx].bottom = true;
+        }
+      }
+    }
+
+    return sides;
+  }
+
+  /**
+   * Sample a narrow strip from a decoded high-res image along one edge to detect
+   * exact pixel thickness of a uniform 1..maxTrim px border line artifact.
+   */
+  function measureOrigBorderTrim(decodedImg, side, maxTrim = 6) {
+    if (!decodedImg?.source || typeof document === 'undefined') return 0;
+    const isHorizontalEdge = side === 'top' || side === 'bottom';
+    const depth = isHorizontalEdge ? decodedImg.height : decodedImg.width;
+    const edgeLen = isHorizontalEdge ? decodedImg.width : decodedImg.height;
+    const limit = Math.min(maxTrim, Math.floor((depth - 4) / 2));
+    if (limit < 1 || edgeLen < 16) return 0;
+
+    const band = limit + 3;
+    const sampleLen = Math.min(96, edgeLen);
+    const canvas = document.createElement('canvas');
+    canvas.width = isHorizontalEdge ? sampleLen : band;
+    canvas.height = isHorizontalEdge ? band : sampleLen;
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = false;
+
+    if (side === 'left') {
+      ctx.drawImage(decodedImg.source, 0, 0, band, decodedImg.height, 0, 0, band, sampleLen);
+    } else if (side === 'right') {
+      ctx.drawImage(
+        decodedImg.source,
+        decodedImg.width - band,
+        0,
+        band,
+        decodedImg.height,
+        0,
+        0,
+        band,
+        sampleLen,
+      );
+    } else if (side === 'top') {
+      ctx.drawImage(decodedImg.source, 0, 0, decodedImg.width, band, 0, 0, sampleLen, band);
+    } else {
+      ctx.drawImage(
+        decodedImg.source,
+        0,
+        decodedImg.height - band,
+        decodedImg.width,
+        band,
+        0,
+        0,
+        sampleLen,
+        band,
+      );
+    }
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    return detectBorderArtifactDepth(
+      { width: canvas.width, height: canvas.height, data: imageData.data },
+      side,
+      limit,
+    );
+  }
+
+  function resolveTileCrop(img, trim) {
+    const left = Math.max(0, trim?.left || 0);
+    const right = Math.max(0, trim?.right || 0);
+    const top = Math.max(0, trim?.top || 0);
+    const bottom = Math.max(0, trim?.bottom || 0);
+    const sw = Math.max(1, img.width - left - right);
+    const sh = Math.max(1, img.height - top - bottom);
+    return { img, sx: left, sy: top, sw, sh };
+  }
+
+  /**
+   * Compute pixel-accurate tile placement rectangles for the requested layout.
+   * Preserves 1:1 native resolution whenever source dimensions align cleanly and
+   * honors optional per-tile internal seam trims.
+   */
+  function computeLayoutPlan(images, layout, order, orderedTrims = null) {
+    const tiles = order.map((idx, slotPos) =>
+      resolveTileCrop(images[idx], orderedTrims ? orderedTrims[slotPos] : null),
+    );
     const rects = [];
     let width = 0;
     let height = 0;
 
     if (layout === 'horizontal') {
-      height = Math.max(...ordered.map((img) => img.height));
+      height = Math.max(...tiles.map((t) => t.sh));
       let x = 0;
-      for (const img of ordered) {
-        const w = img.height === height ? img.width : Math.round((img.width * height) / img.height);
-        rects.push({ img, x, y: 0, w, h: height });
+      for (const tile of tiles) {
+        const w = tile.sh === height ? tile.sw : Math.round((tile.sw * height) / tile.sh);
+        rects.push({ ...tile, x, y: 0, w, h: height });
         x += w;
       }
       width = x;
     } else if (layout === 'vertical') {
-      width = Math.max(...ordered.map((img) => img.width));
+      width = Math.max(...tiles.map((t) => t.sw));
       let y = 0;
-      for (const img of ordered) {
-        const h = img.width === width ? img.height : Math.round((img.height * width) / img.width);
-        rects.push({ img, x: 0, y, w: width, h });
+      for (const tile of tiles) {
+        const h = tile.sw === width ? tile.sh : Math.round((tile.sh * width) / tile.sw);
+        rects.push({ ...tile, x: 0, y, w: width, h });
         y += h;
       }
       height = y;
-    } else if (layout === '3-left-tall' && ordered.length === 3) {
-      const [left, tr, br] = ordered;
-      const rightBaseW = Math.max(tr.width, br.width);
-      const trH0 = tr.width === rightBaseW ? tr.height : Math.round((tr.height * rightBaseW) / tr.width);
-      const brH0 = br.width === rightBaseW ? br.height : Math.round((br.height * rightBaseW) / br.width);
+    } else if (layout === '3-left-tall' && tiles.length === 3) {
+      const [left, tr, br] = tiles;
+      const rightBaseW = Math.max(tr.sw, br.sw);
+      const trH0 = tr.sw === rightBaseW ? tr.sh : Math.round((tr.sh * rightBaseW) / tr.sw);
+      const brH0 = br.sw === rightBaseW ? br.sh : Math.round((br.sh * rightBaseW) / br.sw);
       const rightTotalH0 = trH0 + brH0;
 
-      height = Math.max(left.height, rightTotalH0);
-      const leftScale = height / left.height;
+      height = Math.max(left.sh, rightTotalH0);
+      const leftScale = height / left.sh;
       const rightScale = height / rightTotalH0;
 
-      const leftW = leftScale === 1 ? left.width : Math.round(left.width * leftScale);
+      const leftW = leftScale === 1 ? left.sw : Math.round(left.sw * leftScale);
       const rightW = rightScale === 1 ? rightBaseW : Math.round(rightBaseW * rightScale);
       const trH = rightScale === 1 ? trH0 : Math.round(trH0 * rightScale);
       const brH = height - trH;
 
-      rects.push({ img: left, x: 0, y: 0, w: leftW, h: height });
-      rects.push({ img: tr, x: leftW, y: 0, w: rightW, h: trH });
-      rects.push({ img: br, x: leftW, y: trH, w: rightW, h: brH });
+      rects.push({ ...left, x: 0, y: 0, w: leftW, h: height });
+      rects.push({ ...tr, x: leftW, y: 0, w: rightW, h: trH });
+      rects.push({ ...br, x: leftW, y: trH, w: rightW, h: brH });
       width = leftW + rightW;
-    } else if (layout === '3-right-tall' && ordered.length === 3) {
-      const [tl, bl, right] = ordered;
-      const leftBaseW = Math.max(tl.width, bl.width);
-      const tlH0 = tl.width === leftBaseW ? tl.height : Math.round((tl.height * leftBaseW) / tl.width);
-      const blH0 = bl.width === leftBaseW ? bl.height : Math.round((bl.height * leftBaseW) / bl.width);
+    } else if (layout === '3-right-tall' && tiles.length === 3) {
+      const [tl, bl, right] = tiles;
+      const leftBaseW = Math.max(tl.sw, bl.sw);
+      const tlH0 = tl.sw === leftBaseW ? tl.sh : Math.round((tl.sh * leftBaseW) / tl.sw);
+      const blH0 = bl.sw === leftBaseW ? bl.sh : Math.round((bl.sh * leftBaseW) / bl.sw);
       const leftTotalH0 = tlH0 + blH0;
 
-      height = Math.max(right.height, leftTotalH0);
+      height = Math.max(right.sh, leftTotalH0);
       const leftScale = height / leftTotalH0;
-      const rightScale = height / right.height;
+      const rightScale = height / right.sh;
 
       const leftW = leftScale === 1 ? leftBaseW : Math.round(leftBaseW * leftScale);
-      const rightW = rightScale === 1 ? right.width : Math.round(right.width * rightScale);
+      const rightW = rightScale === 1 ? right.sw : Math.round(right.sw * rightScale);
       const tlH = leftScale === 1 ? tlH0 : Math.round(tlH0 * leftScale);
       const blH = height - tlH;
 
-      rects.push({ img: tl, x: 0, y: 0, w: leftW, h: tlH });
-      rects.push({ img: bl, x: 0, y: tlH, w: leftW, h: blH });
-      rects.push({ img: right, x: leftW, y: 0, w: rightW, h: height });
+      rects.push({ ...tl, x: 0, y: 0, w: leftW, h: tlH });
+      rects.push({ ...bl, x: 0, y: tlH, w: leftW, h: blH });
+      rects.push({ ...right, x: leftW, y: 0, w: rightW, h: height });
       width = leftW + rightW;
-    } else if (layout === '3-top-wide' && ordered.length === 3) {
-      const [top, bl, br] = ordered;
-      const botBaseH = Math.max(bl.height, br.height);
-      const blW0 = bl.height === botBaseH ? bl.width : Math.round((bl.width * botBaseH) / bl.height);
-      const brW0 = br.height === botBaseH ? br.width : Math.round((br.width * botBaseH) / br.height);
+    } else if (layout === '3-top-wide' && tiles.length === 3) {
+      const [top, bl, br] = tiles;
+      const botBaseH = Math.max(bl.sh, br.sh);
+      const blW0 = bl.sh === botBaseH ? bl.sw : Math.round((bl.sw * botBaseH) / bl.sh);
+      const brW0 = br.sh === botBaseH ? br.sw : Math.round((br.sw * botBaseH) / br.sh);
       const botTotalW0 = blW0 + brW0;
 
-      width = Math.max(top.width, botTotalW0);
-      const topScale = width / top.width;
+      width = Math.max(top.sw, botTotalW0);
+      const topScale = width / top.sw;
       const botScale = width / botTotalW0;
 
-      const topH = topScale === 1 ? top.height : Math.round(top.height * topScale);
+      const topH = topScale === 1 ? top.sh : Math.round(top.sh * topScale);
       const botH = botScale === 1 ? botBaseH : Math.round(botBaseH * botScale);
       const blW = botScale === 1 ? blW0 : Math.round(blW0 * botScale);
       const brW = width - blW;
 
-      rects.push({ img: top, x: 0, y: 0, w: width, h: topH });
-      rects.push({ img: bl, x: 0, y: topH, w: blW, h: botH });
-      rects.push({ img: br, x: blW, y: topH, w: brW, h: botH });
+      rects.push({ ...top, x: 0, y: 0, w: width, h: topH });
+      rects.push({ ...bl, x: 0, y: topH, w: blW, h: botH });
+      rects.push({ ...br, x: blW, y: topH, w: brW, h: botH });
       height = topH + botH;
-    } else if (layout === '3-bottom-wide' && ordered.length === 3) {
-      const [tl, tr, bottom] = ordered;
-      const topBaseH = Math.max(tl.height, tr.height);
-      const tlW0 = tl.height === topBaseH ? tl.width : Math.round((tl.width * topBaseH) / tl.height);
-      const trW0 = tr.height === topBaseH ? tr.width : Math.round((tr.width * topBaseH) / tr.height);
+    } else if (layout === '3-bottom-wide' && tiles.length === 3) {
+      const [tl, tr, bottom] = tiles;
+      const topBaseH = Math.max(tl.sh, tr.sh);
+      const tlW0 = tl.sh === topBaseH ? tl.sw : Math.round((tl.sw * topBaseH) / tl.sh);
+      const trW0 = tr.sh === topBaseH ? tr.sw : Math.round((tr.sw * topBaseH) / tr.sh);
       const topTotalW0 = tlW0 + trW0;
 
-      width = Math.max(bottom.width, topTotalW0);
+      width = Math.max(bottom.sw, topTotalW0);
       const topScale = width / topTotalW0;
-      const botScale = width / bottom.width;
+      const botScale = width / bottom.sw;
 
       const topH = topScale === 1 ? topBaseH : Math.round(topBaseH * topScale);
-      const botH = botScale === 1 ? bottom.height : Math.round(bottom.height * botScale);
+      const botH = botScale === 1 ? bottom.sh : Math.round(bottom.sh * botScale);
       const tlW = topScale === 1 ? tlW0 : Math.round(tlW0 * topScale);
       const trW = width - tlW;
 
-      rects.push({ img: tl, x: 0, y: 0, w: tlW, h: topH });
-      rects.push({ img: tr, x: tlW, y: 0, w: trW, h: topH });
-      rects.push({ img: bottom, x: 0, y: topH, w: width, h: botH });
+      rects.push({ ...tl, x: 0, y: 0, w: tlW, h: topH });
+      rects.push({ ...tr, x: tlW, y: 0, w: trW, h: topH });
+      rects.push({ ...bottom, x: 0, y: topH, w: width, h: botH });
       height = topH + botH;
     } else {
       const grid = parseGridLayout(layout);
-      if (!grid || grid.rows * grid.cols !== ordered.length) {
-        return computeLayoutPlan(images, 'vertical', order);
+      if (!grid || grid.rows * grid.cols !== tiles.length) {
+        return computeLayoutPlan(images, 'vertical', order, orderedTrims);
       }
 
       const rowInfos = [];
       for (let r = 0; r < grid.rows; r++) {
-        const rowImgs = ordered.slice(r * grid.cols, (r + 1) * grid.cols);
-        const rowH = Math.max(...rowImgs.map((img) => img.height));
-        const widths = rowImgs.map((img) =>
-          img.height === rowH ? img.width : Math.round((img.width * rowH) / img.height),
-        );
+        const rowTiles = tiles.slice(r * grid.cols, (r + 1) * grid.cols);
+        const rowH = Math.max(...rowTiles.map((t) => t.sh));
+        const widths = rowTiles.map((t) => (t.sh === rowH ? t.sw : Math.round((t.sw * rowH) / t.sh)));
         const totalW = widths.reduce((acc, w) => acc + w, 0);
-        rowInfos.push({ rowImgs, rowH, widths, totalW });
+        rowInfos.push({ rowTiles, rowH, widths, totalW });
       }
 
       width = Math.max(...rowInfos.map((info) => info.totalW));
@@ -1485,10 +2050,10 @@
         const scale = width / info.totalW;
         const scaledH = scale === 1 ? info.rowH : Math.round(info.rowH * scale);
         let x = 0;
-        for (let c = 0; c < info.rowImgs.length; c++) {
-          const isLast = c === info.rowImgs.length - 1;
+        for (let c = 0; c < info.rowTiles.length; c++) {
+          const isLast = c === info.rowTiles.length - 1;
           const scaledW = isLast ? width - x : scale === 1 ? info.widths[c] : Math.round(info.widths[c] * scale);
-          rects.push({ img: info.rowImgs[c], x, y, w: scaledW, h: scaledH });
+          rects.push({ ...info.rowTiles[c], x, y, w: scaledW, h: scaledH });
           x += scaledW;
         }
         y += scaledH;
@@ -1518,8 +2083,23 @@
     return { width, height, rects, downscale };
   }
 
-  function renderStitchedCanvas(decodedImages, layout, order) {
-    const plan = computeLayoutPlan(decodedImages, layout, order);
+  function renderStitchedCanvas(decodedImages, layout, order, { autoTrimBorders = true } = {}) {
+    let orderedTrims = null;
+    if (autoTrimBorders) {
+      const seamSides = getInternalSeamSides(order.length, layout);
+      orderedTrims = order.map((imgIdx, slotPos) => {
+        const img = decodedImages[imgIdx];
+        const mask = seamSides[slotPos];
+        return {
+          left: mask.left ? measureOrigBorderTrim(img, 'left') : 0,
+          right: mask.right ? measureOrigBorderTrim(img, 'right') : 0,
+          top: mask.top ? measureOrigBorderTrim(img, 'top') : 0,
+          bottom: mask.bottom ? measureOrigBorderTrim(img, 'bottom') : 0,
+        };
+      });
+    }
+
+    const plan = computeLayoutPlan(decodedImages, layout, order, orderedTrims);
     const canvas = document.createElement('canvas');
     canvas.width = plan.width;
     canvas.height = plan.height;
@@ -1529,7 +2109,7 @@
     ctx.imageSmoothingQuality = 'high';
 
     for (const rect of plan.rects) {
-      ctx.drawImage(rect.img.source, rect.x, rect.y, rect.w, rect.h);
+      ctx.drawImage(rect.img.source, rect.sx, rect.sy, rect.sw, rect.sh, rect.x, rect.y, rect.w, rect.h);
     }
 
     return { canvas, width: plan.width, height: plan.height };
@@ -1773,6 +2353,8 @@
       'M6 16h12V8H6zm2-6h8v4H8zm-4 5H2v3c0 1.1.9 2 2 2h3v-2H4zm0-9h3V4H4c-1.1 0-2 .9-2 2v3h2zm16-2h-3v2h3v3h2V6c0-1.1-.9-2-2-2m0 14h-3v2h3c1.1 0 2-.9 2-2v-3h-2z',
     restart_alt:
       'M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z',
+    chevron_left: 'M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z',
+    chevron_right: 'M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z',
   };
 
   function createIcon(name, size = 16) {
@@ -1801,6 +2383,9 @@
   const TEXT = {
     stitch: IS_ZH ? '拼图' : 'Stitch',
     suggested: IS_ZH ? '检测到拼图' : 'Split Detected',
+    partialSuggested: IS_ZH ? '局部拼图' : 'Partial Split',
+    multiGroupSuffix: IS_ZH ? '组拼图' : 'Split Groups',
+    singleSlide: IS_ZH ? '单图' : 'Single',
     original: IS_ZH ? '原图' : 'Orig',
     auto: IS_ZH ? '自动' : 'Auto',
     unshuffledBadge: IS_ZH ? '已自动复原顺序' : 'Auto Unshuffled',
@@ -1809,9 +2394,11 @@
     autoOrder: IS_ZH ? '自动排序' : 'Auto',
     resetOrder: IS_ZH ? '默认' : 'Reset',
     zoomTitle: IS_ZH ? '全屏放大预览' : 'Fullscreen preview',
-    downloadTitle: IS_ZH ? '下载拼合原图' : 'Download stitched image',
-    copyTitle: IS_ZH ? '复制拼合图到剪贴板' : 'Copy image to clipboard',
+    downloadTitle: IS_ZH ? '下载当前原图' : 'Download current image',
+    copyTitle: IS_ZH ? '复制当前图片到剪贴板' : 'Copy current image to clipboard',
     settingsTitle: IS_ZH ? '设置' : 'Settings',
+    prevItemTitle: IS_ZH ? '上一项' : 'Previous item',
+    nextItemTitle: IS_ZH ? '下一项' : 'Next item',
     loading: IS_ZH ? '拼合中...' : 'Stitching...',
     lbFit: IS_ZH ? '适应窗口' : 'Fit',
     lbActual: '1:1',
@@ -1821,6 +2408,9 @@
     lbFooter: IS_ZH
       ? '滚轮缩放 · 拖拽平移 · 单击切换适应/原尺寸 · 快捷键: D 下载 / C 复制 / 0 适应 / ESC 关闭'
       : 'Wheel to zoom · Drag to pan · Click toggles Fit/1:1 · Keys: D download / C copy / 0 fit / ESC close',
+    lbFooterMulti: IS_ZH
+      ? '滚轮缩放 · 拖拽平移 · ←/→ 切换画廊 · 单击适应/1:1 · D 下载 / C 复制 / ESC 关闭'
+      : 'Wheel zoom · Drag pan · ←/→ switch item · Click Fit/1:1 · D download / C copy / ESC close',
     settingsHeading: IS_ZH ? 'X Art Stitcher 设置' : 'X Art Stitcher Settings',
     optAutoDetect: IS_ZH ? '自动识别多图拼图' : 'Auto-detect split artworks',
     optAutoDetectDesc: IS_ZH
@@ -1873,6 +2463,22 @@
     }
   }
 
+  function formatIndexRange(indices) {
+    if (!indices || indices.length === 0) return '';
+    const sorted = indices.slice().sort((a, b) => a - b);
+    let contiguous = true;
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i] !== sorted[i - 1] + 1) {
+        contiguous = false;
+        break;
+      }
+    }
+    if (contiguous && sorted.length > 1) {
+      return `${sorted[0] + 1}–${sorted[sorted.length - 1] + 1}`;
+    }
+    return sorted.map((i) => i + 1).join(',');
+  }
+
   let toastTimer = null;
   let toastEl = null;
 
@@ -1920,9 +2526,20 @@
     return btn;
   }
 
-  function openLightbox({ url, title, width, height, onDownload, onCopy }) {
+  function openLightbox({
+    items,
+    activeIndex = 0,
+    onSelectIndex,
+    onDownload,
+    onCopy,
+  }) {
+    if (!Array.isArray(items) || items.length === 0) return;
     const existing = document.querySelector('.xas-lightbox');
     if (existing) existing.remove();
+
+    const slideList = items.map((item) => ({ ...item, width: item.width || 0, height: item.height || 0 }));
+    let currentIdx = Math.max(0, Math.min(slideList.length - 1, activeIndex));
+    const isMulti = slideList.length > 1;
 
     const overlay = document.createElement('div');
     overlay.className = 'xas-lightbox';
@@ -1932,7 +2549,6 @@
 
     const titleEl = document.createElement('div');
     titleEl.className = 'xas-lb-title';
-    titleEl.textContent = `${title} · ${width}×${height}`;
 
     const actions = document.createElement('div');
     actions.className = 'xas-lb-actions';
@@ -1954,14 +2570,43 @@
 
     const img = document.createElement('img');
     img.className = 'xas-lb-img';
-    img.src = url;
-    img.alt = title;
     viewport.appendChild(img);
+
+    let prevBtn = null;
+    let nextBtn = null;
+    if (isMulti) {
+      prevBtn = document.createElement('button');
+      prevBtn.type = 'button';
+      prevBtn.className = 'xas-lb-nav xas-lb-prev';
+      prevBtn.title = t('prevItemTitle');
+      prevBtn.setAttribute('aria-label', t('prevItemTitle'));
+      prevBtn.appendChild(createIcon('chevron_left', 24));
+      prevBtn.addEventListener('click', (e) => {
+        stopBubble(e);
+        stepSlide(-1);
+      });
+
+      nextBtn = document.createElement('button');
+      nextBtn.type = 'button';
+      nextBtn.className = 'xas-lb-nav xas-lb-next';
+      nextBtn.title = t('nextItemTitle');
+      nextBtn.setAttribute('aria-label', t('nextItemTitle'));
+      nextBtn.appendChild(createIcon('chevron_right', 24));
+      nextBtn.addEventListener('click', (e) => {
+        stopBubble(e);
+        stepSlide(1);
+      });
+
+      viewport.appendChild(prevBtn);
+      viewport.appendChild(nextBtn);
+    }
 
     const footer = document.createElement('div');
     footer.className = 'xas-lb-footer';
-    footer.textContent = t('lbFooter');
+    footer.textContent = isMulti ? t('lbFooterMulti') : t('lbFooter');
 
+    let curW = 1;
+    let curH = 1;
     let scale = 1;
     let fitScale = 1;
     let tx = 0;
@@ -1982,7 +2627,9 @@
       const pad = 24;
       const availW = Math.max(100, rect.width - pad * 2);
       const availH = Math.max(100, rect.height - pad * 2);
-      return Math.min(1, availW / Math.max(1, width), availH / Math.max(1, height));
+      const w = Math.max(1, curW || img.naturalWidth || 1);
+      const h = Math.max(1, curH || img.naturalHeight || 1);
+      return Math.min(1, availW / w, availH / h);
     };
 
     const setFit = () => {
@@ -1999,6 +2646,49 @@
       tx = 0;
       ty = 0;
       applyTransform();
+    };
+
+    const updateTitle = () => {
+      const item = slideList[currentIdx];
+      const parts = [item.title];
+      if (curW > 0 && curH > 0) parts.push(`${curW}×${curH}`);
+      if (isMulti) parts.push(`${currentIdx + 1} / ${slideList.length}`);
+      titleEl.textContent = parts.join(' · ');
+    };
+
+    const loadSlide = (idx) => {
+      currentIdx = idx;
+      const item = slideList[currentIdx];
+      curW = item.width || 0;
+      curH = item.height || 0;
+      img.src = item.url;
+      img.alt = item.title;
+      updateTitle();
+      if (prevBtn) prevBtn.style.display = currentIdx > 0 ? 'inline-flex' : 'none';
+      if (nextBtn) nextBtn.style.display = currentIdx + 1 < slideList.length ? 'inline-flex' : 'none';
+      if (curW > 0 && curH > 0) {
+        requestAnimationFrame(setFit);
+      }
+    };
+
+    img.addEventListener('load', () => {
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        if (!curW || !curH) {
+          curW = img.naturalWidth;
+          curH = img.naturalHeight;
+          slideList[currentIdx].width = curW;
+          slideList[currentIdx].height = curH;
+          updateTitle();
+        }
+        setFit();
+      }
+    });
+
+    const stepSlide = (delta) => {
+      const nextIdx = currentIdx + delta;
+      if (nextIdx < 0 || nextIdx >= slideList.length) return;
+      loadSlide(nextIdx);
+      onSelectIndex?.(nextIdx);
     };
 
     const close = () => {
@@ -2022,6 +2712,12 @@
       if (e.key === 'Escape') {
         stopBubble(e);
         close();
+      } else if (isMulti && e.key === 'ArrowLeft') {
+        stopBubble(e);
+        stepSlide(-1);
+      } else if (isMulti && e.key === 'ArrowRight') {
+        stopBubble(e);
+        stepSlide(1);
       } else if (e.key === '0') {
         stopBubble(e);
         setFit();
@@ -2038,10 +2734,10 @@
         applyTransform();
       } else if (e.key.toLowerCase() === 'd') {
         stopBubble(e);
-        onDownload();
+        onDownload(currentIdx);
       } else if (e.key.toLowerCase() === 'c') {
         stopBubble(e);
-        onCopy();
+        onCopy(currentIdx);
       }
     };
 
@@ -2057,7 +2753,7 @@
     );
 
     viewport.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 || e.target.closest('.xas-lb-nav')) return;
       isDragging = true;
       dragMoved = false;
       startX = e.clientX;
@@ -2102,8 +2798,8 @@
 
     actions.appendChild(makeBtn(t('lbFit'), false, setFit, 'fit_screen'));
     actions.appendChild(makeBtn(t('lbActual'), false, setActual));
-    actions.appendChild(makeBtn(t('lbCopy'), false, onCopy, 'content_copy'));
-    actions.appendChild(makeBtn(t('lbDownload'), true, onDownload, 'download'));
+    actions.appendChild(makeBtn(t('lbCopy'), false, () => onCopy(currentIdx), 'content_copy'));
+    actions.appendChild(makeBtn(t('lbDownload'), true, () => onDownload(currentIdx), 'download'));
     actions.appendChild(makeBtn(t('lbClose'), false, close, 'close'));
 
     header.appendChild(titleEl);
@@ -2116,7 +2812,7 @@
     window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('resize', onResize);
 
-    requestAnimationFrame(setFit);
+    loadSlide(currentIdx);
   }
 
   function openSettingsModal(currentConfig, onSave) {
@@ -2262,7 +2958,8 @@
   }
 
   /**
-   * Manage the injected UI controls and stitched preview stage for a single tweet gallery.
+   * Manage the injected UI controls and stitched / mixed-gallery preview stage
+   * for a single tweet gallery.
    */
   function createGalleryUI(gallery, callbacks) {
     const { container, urls } = gallery;
@@ -2276,6 +2973,9 @@
     stage.className = 'xas-injected xas-stage';
     stage.style.display = 'none';
 
+    const stageMedia = document.createElement('div');
+    stageMedia.className = 'xas-stage-media';
+
     const previewImg = document.createElement('img');
     previewImg.className = 'xas-preview';
     previewImg.addEventListener('click', (e) => {
@@ -2283,34 +2983,179 @@
       callbacks.onOpenLightbox();
     });
 
+    const prevNavBtn = document.createElement('button');
+    prevNavBtn.type = 'button';
+    prevNavBtn.className = 'xas-nav-btn xas-nav-prev';
+    prevNavBtn.title = t('prevItemTitle');
+    prevNavBtn.setAttribute('aria-label', t('prevItemTitle'));
+    prevNavBtn.style.display = 'none';
+    prevNavBtn.appendChild(createIcon('chevron_left', 22));
+    prevNavBtn.addEventListener('click', (e) => {
+      stopBubble(e);
+      if (state.activeIndex > 0) {
+        callbacks.onSelectGalleryItem?.(state.activeIndex - 1);
+      }
+    });
+
+    const nextNavBtn = document.createElement('button');
+    nextNavBtn.type = 'button';
+    nextNavBtn.className = 'xas-nav-btn xas-nav-next';
+    nextNavBtn.title = t('nextItemTitle');
+    nextNavBtn.setAttribute('aria-label', t('nextItemTitle'));
+    nextNavBtn.style.display = 'none';
+    nextNavBtn.appendChild(createIcon('chevron_right', 22));
+    nextNavBtn.addEventListener('click', (e) => {
+      stopBubble(e);
+      if (state.activeIndex + 1 < state.items.length) {
+        callbacks.onSelectGalleryItem?.(state.activeIndex + 1);
+      }
+    });
+
     const metaBadge = document.createElement('div');
     metaBadge.className = 'xas-meta-badge';
 
-    stage.appendChild(previewImg);
-    stage.appendChild(metaBadge);
+    stageMedia.appendChild(previewImg);
+    stageMedia.appendChild(prevNavBtn);
+    stageMedia.appendChild(nextNavBtn);
+    stageMedia.appendChild(metaBadge);
+
+    const filmstrip = document.createElement('div');
+    filmstrip.className = 'xas-gallery-strip';
+    filmstrip.style.display = 'none';
+    filmstrip.addEventListener('click', stopBubble);
+    filmstrip.addEventListener(
+      'wheel',
+      (e) => {
+        if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && filmstrip.scrollWidth > filmstrip.clientWidth) {
+          e.preventDefault();
+          filmstrip.scrollLeft += e.deltaY;
+        }
+      },
+      { passive: false },
+    );
+
+    stage.appendChild(stageMedia);
+    stage.appendChild(filmstrip);
 
     container.appendChild(stage);
     container.appendChild(toolbar);
 
     const state = {
-      stitched: false,
+      active: false,
       busy: false,
       expanded: false,
       showOrderEditor: false,
       selectedSlot: null,
-      activeLayout: null,
-      order: Array.from({ length: urls.length }, (_, i) => i),
-      suggested: null, // { layout, order, wasUnshuffled }
-      wasUnshuffled: false,
-      width: 0,
-      height: 0,
+      items: [], // [{ type: 'stitched', ... } | { type: 'single', ... }]
+      activeIndex: 0,
+      suggested: null, // full or partial suggestion
     };
 
-    const layouts = getAvailableLayouts(urls.length);
+    const fullLayouts = getAvailableLayouts(urls.length);
+
+    const getActiveItem = () => (state.active ? state.items[state.activeIndex] || null : null);
+
+    const formatSuggestionLabel = (s) => {
+      if (s.isPartial) {
+        if (s.stitchedCount > 1) {
+          return `${s.stitchedCount} ${t('multiGroupSuffix')}`;
+        }
+        const range = formatIndexRange(s.primaryGroup.indices);
+        return `${t('partialSuggested')} #${range} (${getLayoutLabel(s.primaryGroup.layout)})`;
+      }
+      return `${t('suggested')} (${getLayoutLabel(s.layout)})`;
+    };
+
+    const updateStageView = () => {
+      const item = getActiveItem();
+      if (!item) return;
+
+      const isMulti = state.items.length > 1;
+      previewImg.src = item.type === 'stitched' ? item.objectUrl : item.url;
+
+      prevNavBtn.style.display = isMulti && state.activeIndex > 0 ? 'inline-flex' : 'none';
+      nextNavBtn.style.display = isMulti && state.activeIndex + 1 < state.items.length ? 'inline-flex' : 'none';
+
+      metaBadge.textContent = '';
+      const parts = [];
+      if (item.type === 'stitched') {
+        if (item.wasUnshuffled) {
+          metaBadge.appendChild(createIcon('auto_awesome', 14));
+          parts.push(t('unshuffledBadge'));
+        }
+        if (isMulti) parts.push(`#${formatIndexRange(item.indices)}`);
+        parts.push(getLayoutLabel(item.layout));
+        if (item.width > 0 && item.height > 0) parts.push(`${item.width}×${item.height}`);
+      } else {
+        parts.push(`#${item.index + 1}`);
+        parts.push(t('singleSlide'));
+        if (item.width > 0 && item.height > 0) parts.push(`${item.width}×${item.height}`);
+      }
+      if (isMulti) {
+        parts.push(`${state.activeIndex + 1} / ${state.items.length}`);
+      }
+      const metaText = document.createElement('span');
+      metaText.textContent = parts.join(' · ');
+      metaBadge.appendChild(metaText);
+
+      if (!isMulti) {
+        filmstrip.style.display = 'none';
+        filmstrip.textContent = '';
+        return;
+      }
+
+      filmstrip.style.display = 'flex';
+      filmstrip.textContent = '';
+      state.items.forEach((entry, idx) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        const isSelected = idx === state.activeIndex;
+        btn.className =
+          'xas-thumb' +
+          (entry.type === 'stitched' ? ' xas-thumb-stitched' : '') +
+          (isSelected ? ' xas-thumb-active' : '');
+        const label =
+          entry.type === 'stitched'
+            ? `${t('stitch')} #${formatIndexRange(entry.indices)} (${getLayoutLabel(entry.layout)})`
+            : `#${entry.index + 1}`;
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+
+        const thumbImg = document.createElement('img');
+        thumbImg.className = 'xas-thumb-img';
+        thumbImg.src = entry.type === 'stitched' ? entry.objectUrl : entry.thumbUrl;
+        thumbImg.alt = label;
+        btn.appendChild(thumbImg);
+
+        const tag = document.createElement('span');
+        tag.className = 'xas-thumb-tag';
+        if (entry.type === 'stitched') {
+          tag.appendChild(createIcon('grid_view', 11));
+          const tagText = document.createElement('span');
+          tagText.textContent = formatIndexRange(entry.indices);
+          tag.appendChild(tagText);
+        } else {
+          tag.textContent = String(entry.index + 1);
+        }
+        btn.appendChild(tag);
+
+        btn.addEventListener('click', (e) => {
+          stopBubble(e);
+          if (idx !== state.activeIndex) {
+            callbacks.onSelectGalleryItem?.(idx);
+          }
+        });
+
+        filmstrip.appendChild(btn);
+        if (isSelected) {
+          btn.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+        }
+      });
+    };
 
     const renderToolbar = () => {
       toolbar.textContent = '';
-      toolbar.classList.toggle('xas-expanded', state.expanded || state.stitched);
+      toolbar.classList.toggle('xas-expanded', state.expanded || state.active);
 
       const pill = document.createElement('div');
       pill.className = 'xas-pill';
@@ -2327,25 +3172,28 @@
         return;
       }
 
-      if (!state.stitched && !state.expanded) {
+      if (!state.active && !state.expanded) {
         pill.classList.add(state.suggested ? 'xas-suggested' : 'xas-collapsed');
         const trigger = document.createElement('button');
         trigger.type = 'button';
         trigger.className = state.suggested ? 'xas-btn xas-btn-accent' : 'xas-btn';
         if (state.suggested) {
-          appendIconLabel(
-            trigger,
-            'auto_awesome',
-            `${t('suggested')} (${getLayoutLabel(state.suggested.layout)})`,
-            15,
-          );
+          appendIconLabel(trigger, 'auto_awesome', formatSuggestionLabel(state.suggested), 15);
         } else {
           appendIconLabel(trigger, 'grid_view', t('stitch'), 15);
         }
         trigger.addEventListener('click', (e) => {
           stopBubble(e);
           if (state.suggested) {
-            callbacks.onSelectLayout(state.suggested.layout, state.suggested.order, state.suggested.wasUnshuffled);
+            if (state.suggested.isPartial) {
+              callbacks.onOpenMixedGallery?.(state.suggested.groups);
+            } else {
+              callbacks.onSelectLayout(
+                state.suggested.layout,
+                state.suggested.order,
+                state.suggested.wasUnshuffled,
+              );
+            }
           } else {
             state.expanded = true;
             renderToolbar();
@@ -2356,17 +3204,20 @@
         return;
       }
 
-      // Restore original view button (or collapse if not stitched)
+      const activeItem = getActiveItem();
+      const isStitchedItem = Boolean(activeItem && activeItem.type === 'stitched');
+
+      // Restore original view button (or collapse if not active)
       const origBtn = document.createElement('button');
       origBtn.type = 'button';
-      origBtn.className = state.stitched ? 'xas-btn' : 'xas-btn xas-btn-active';
+      origBtn.className = state.active ? 'xas-btn' : 'xas-btn xas-btn-active';
       origBtn.textContent = t('original');
       origBtn.addEventListener('click', (e) => {
         stopBubble(e);
         state.expanded = false;
         state.showOrderEditor = false;
         state.selectedSlot = null;
-        if (state.stitched) {
+        if (state.active) {
           callbacks.onRestoreOriginal();
         } else {
           renderToolbar();
@@ -2374,21 +3225,19 @@
       });
       pill.appendChild(origBtn);
 
-      // Layout selector buttons
-      for (const layout of layouts) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className =
-          state.stitched && state.activeLayout === layout ? 'xas-btn xas-btn-active' : 'xas-btn';
-        btn.textContent = getLayoutLabel(layout);
-        btn.addEventListener('click', (e) => {
-          stopBubble(e);
-          callbacks.onSelectLayout(layout, null, false);
-        });
-        pill.appendChild(btn);
-      }
+      if (!state.active) {
+        for (const layout of fullLayouts) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'xas-btn';
+          btn.textContent = getLayoutLabel(layout);
+          btn.addEventListener('click', (e) => {
+            stopBubble(e);
+            callbacks.onSelectLayout(layout, null, false);
+          });
+          pill.appendChild(btn);
+        }
 
-      if (!state.stitched) {
         const autoBtn = document.createElement('button');
         autoBtn.type = 'button';
         autoBtn.className = 'xas-btn xas-btn-accent';
@@ -2399,22 +3248,40 @@
         });
         pill.appendChild(autoBtn);
       } else {
+        if (isStitchedItem) {
+          const groupLayouts = getAvailableLayouts(activeItem.indices.length);
+          for (const layout of groupLayouts) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = activeItem.layout === layout ? 'xas-btn xas-btn-active' : 'xas-btn';
+            btn.textContent = getLayoutLabel(layout);
+            btn.addEventListener('click', (e) => {
+              stopBubble(e);
+              callbacks.onSelectLayout(layout, null, false);
+            });
+            pill.appendChild(btn);
+          }
+        }
+
         const sep = document.createElement('span');
         sep.className = 'xas-sep';
         pill.appendChild(sep);
 
-        pill.appendChild(
-          makeIconButton({
-            icon: 'swap_horiz',
-            title: t('orderBtnTitle'),
-            active: state.showOrderEditor,
-            onClick: () => {
-              state.showOrderEditor = !state.showOrderEditor;
-              state.selectedSlot = null;
-              renderToolbar();
-            },
-          }),
-        );
+        if (isStitchedItem) {
+          pill.appendChild(
+            makeIconButton({
+              icon: 'swap_horiz',
+              title: t('orderBtnTitle'),
+              active: state.showOrderEditor,
+              onClick: () => {
+                state.showOrderEditor = !state.showOrderEditor;
+                state.selectedSlot = null;
+                renderToolbar();
+              },
+            }),
+          );
+        }
+
         pill.appendChild(
           makeIconButton({
             icon: 'zoom_in',
@@ -2448,8 +3315,8 @@
 
       toolbar.appendChild(pill);
 
-      // Optional inline tile-order swapper bar
-      if (state.stitched && state.showOrderEditor) {
+      // Optional inline tile-order swapper bar for the active stitched item
+      if (isStitchedItem && state.showOrderEditor) {
         const orderBar = document.createElement('div');
         orderBar.className = 'xas-order-bar';
 
@@ -2458,12 +3325,13 @@
         hint.textContent = t('orderHint');
         orderBar.appendChild(hint);
 
-        state.order.forEach((origIdx, slotPos) => {
+        activeItem.order.forEach((localIdx, slotPos) => {
+          const origTweetIdx = activeItem.indices[localIdx];
           const chip = document.createElement('button');
           chip.type = 'button';
           chip.className =
             state.selectedSlot === slotPos ? 'xas-slot-chip xas-slot-selected' : 'xas-slot-chip';
-          chip.textContent = String(origIdx + 1);
+          chip.textContent = String(origTweetIdx + 1);
           chip.addEventListener('click', (e) => {
             stopBubble(e);
             if (state.selectedSlot === null) {
@@ -2476,7 +3344,7 @@
               renderToolbar();
               return;
             }
-            const nextOrder = state.order.slice();
+            const nextOrder = activeItem.order.slice();
             const a = state.selectedSlot;
             [nextOrder[a], nextOrder[slotPos]] = [nextOrder[slotPos], nextOrder[a]];
             state.selectedSlot = null;
@@ -2491,7 +3359,7 @@
         appendIconLabel(autoOrderBtn, 'auto_awesome', t('autoOrder'), 14);
         autoOrderBtn.addEventListener('click', (e) => {
           stopBubble(e);
-          callbacks.onAutoSolve(state.activeLayout);
+          callbacks.onAutoSolve(activeItem.layout);
         });
         orderBar.appendChild(autoOrderBtn);
 
@@ -2501,7 +3369,7 @@
         appendIconLabel(resetOrderBtn, 'restart_alt', t('resetOrder'), 14);
         resetOrderBtn.addEventListener('click', (e) => {
           stopBubble(e);
-          callbacks.onChangeOrder(Array.from({ length: urls.length }, (_, i) => i));
+          callbacks.onChangeOrder(Array.from({ length: activeItem.indices.length }, (_, i) => i));
         });
         orderBar.appendChild(resetOrderBtn);
 
@@ -2510,6 +3378,23 @@
     };
 
     renderToolbar();
+
+    const showGallery = ({ items, activeIndex = 0 }) => {
+      state.active = true;
+      state.busy = false;
+      state.items = items;
+      state.activeIndex = Math.max(0, Math.min(items.length - 1, activeIndex));
+      const current = getActiveItem();
+      if (!current || current.type !== 'stitched') {
+        state.showOrderEditor = false;
+        state.selectedSlot = null;
+      }
+
+      updateStageView();
+      stage.style.display = 'flex';
+      container.classList.add('xas-active');
+      renderToolbar();
+    };
 
     return {
       setBusy(isBusy) {
@@ -2520,35 +3405,14 @@
         state.suggested = suggestion;
         renderToolbar();
       },
-      showStitched({ objectUrl, layout, order, width, height, wasUnshuffled }) {
-        state.stitched = true;
-        state.busy = false;
-        state.activeLayout = layout;
-        state.order = order.slice();
-        state.width = width;
-        state.height = height;
-        state.wasUnshuffled = Boolean(wasUnshuffled);
-
-        previewImg.src = objectUrl;
-        metaBadge.textContent = '';
-        const parts = [getLayoutLabel(layout), `${width}×${height}`];
-        if (state.wasUnshuffled) {
-          metaBadge.appendChild(createIcon('auto_awesome', 14));
-          parts.unshift(t('unshuffledBadge'));
-        }
-        const metaText = document.createElement('span');
-        metaText.textContent = parts.join(' · ');
-        metaBadge.appendChild(metaText);
-
-        stage.style.display = 'flex';
-        container.classList.add('xas-active');
-        renderToolbar();
-      },
+      showGallery,
       showOriginal() {
-        state.stitched = false;
+        state.active = false;
         state.busy = false;
         state.showOrderEditor = false;
         state.selectedSlot = null;
+        state.items = [];
+        state.activeIndex = 0;
         stage.style.display = 'none';
         container.classList.remove('xas-active');
         renderToolbar();
@@ -2563,7 +3427,7 @@
 
   // --- main.js ---
   // Replaced at build time with contents of src/styles.css.
-  const STYLES_CSS = ".xas-root {\n  position: relative !important;\n}\n\n.xas-root.xas-active {\n  height: auto !important;\n  min-height: 0 !important;\n  overflow: visible !important;\n}\n\n.xas-root.xas-active > :not(.xas-injected) {\n  display: none !important;\n}\n\n.xas-stage {\n  position: relative;\n  width: 100%;\n  border-radius: 16px;\n  overflow: hidden;\n  background: rgba(15, 20, 25, 0.35);\n  border: 1px solid rgba(128, 128, 128, 0.22);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n}\n\n.xas-preview {\n  display: block;\n  width: 100%;\n  height: auto;\n  max-height: 82vh;\n  object-fit: contain;\n  cursor: zoom-in;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-toolbar {\n  position: absolute;\n  top: 8px;\n  right: 8px;\n  z-index: 30;\n  max-width: calc(100% - 16px);\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 12px;\n  line-height: 1;\n  pointer-events: auto;\n}\n\n.xas-pill {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  padding: 4px 6px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.78);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  backdrop-filter: blur(10px);\n  -webkit-backdrop-filter: blur(10px);\n  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);\n  opacity: 0.78;\n  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;\n}\n\n.xas-root:hover .xas-pill,\n.xas-toolbar:hover .xas-pill,\n.xas-toolbar.xas-expanded .xas-pill,\n.xas-pill.xas-suggested {\n  opacity: 1;\n}\n\n.xas-pill.xas-suggested {\n  border-color: rgba(29, 155, 240, 0.75);\n  background: rgba(15, 24, 34, 0.88);\n}\n\n.xas-pill.xas-collapsed {\n  opacity: 0.52;\n  padding: 3px 5px;\n}\n\n.xas-root:hover .xas-pill.xas-collapsed {\n  opacity: 0.95;\n}\n\n.xas-icon {\n  display: block;\n  flex-shrink: 0;\n  fill: currentColor;\n}\n\n.xas-btn {\n  appearance: none;\n  border: none;\n  background: transparent;\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 26px;\n  padding: 0 9px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 4px;\n  white-space: nowrap;\n  transition: background 0.14s ease, color 0.14s ease;\n}\n\n.xas-btn.xas-btn-icon {\n  width: 26px;\n  padding: 0;\n}\n\n.xas-btn:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.xas-btn:disabled {\n  opacity: 0.45;\n  cursor: wait;\n}\n\n.xas-btn.xas-btn-active {\n  background: #1d9bf0;\n  color: #ffffff;\n}\n\n.xas-btn.xas-btn-accent {\n  color: #6cc5ff;\n}\n\n.xas-sep {\n  width: 1px;\n  height: 14px;\n  background: rgba(255, 255, 255, 0.18);\n  margin: 0 2px;\n}\n\n.xas-order-bar {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 4px;\n  padding: 5px 8px;\n  border-radius: 12px;\n  background: rgba(15, 20, 25, 0.9);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  backdrop-filter: blur(10px);\n  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);\n}\n\n.xas-order-hint {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-right: 2px;\n}\n\n.xas-slot-chip {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.24);\n  background: rgba(255, 255, 255, 0.08);\n  color: #eff3f4;\n  font: inherit;\n  font-weight: 700;\n  min-width: 24px;\n  height: 24px;\n  padding: 0 6px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;\n}\n\n.xas-slot-chip:hover {\n  background: rgba(255, 255, 255, 0.2);\n}\n\n.xas-slot-chip.xas-slot-selected {\n  background: #1d9bf0;\n  border-color: #6cc5ff;\n  color: #fff;\n  transform: scale(1.06);\n}\n\n.xas-meta-badge {\n  position: absolute;\n  left: 10px;\n  bottom: 10px;\n  z-index: 25;\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  padding: 4px 9px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.72);\n  color: #e7e9ea;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 11px;\n  font-weight: 600;\n  border: 1px solid rgba(255, 255, 255, 0.14);\n  backdrop-filter: blur(8px);\n  pointer-events: none;\n  opacity: 0;\n  transition: opacity 0.18s ease;\n}\n\n.xas-stage:hover .xas-meta-badge,\n.xas-root:hover .xas-meta-badge {\n  opacity: 1;\n}\n\n.xas-spinner {\n  display: inline-block;\n  width: 12px;\n  height: 12px;\n  border: 2px solid rgba(255, 255, 255, 0.28);\n  border-top-color: #1d9bf0;\n  border-radius: 50%;\n  animation: xas-spin 0.75s linear infinite;\n}\n\n@keyframes xas-spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n/* Fullscreen Lightbox */\n.xas-lightbox {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  background: rgba(0, 0, 0, 0.92);\n  backdrop-filter: blur(10px);\n  display: flex;\n  flex-direction: column;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  color: #eff3f4;\n  user-select: none;\n}\n\n.xas-lb-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 18px;\n  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));\n  z-index: 2;\n}\n\n.xas-lb-title {\n  font-size: 13px;\n  font-weight: 600;\n  color: #e7e9ea;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xas-lb-actions {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-shrink: 0;\n}\n\n.xas-lb-btn {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(25, 32, 40, 0.85);\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 30px;\n  padding: 0 12px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  white-space: nowrap;\n  transition: background 0.15s ease, border-color 0.15s ease;\n}\n\n.xas-lb-btn:hover {\n  background: rgba(45, 58, 72, 0.95);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-lb-btn.xas-lb-primary {\n  background: #1d9bf0;\n  border-color: #1d9bf0;\n  color: #fff;\n}\n\n.xas-lb-btn.xas-lb-primary:hover {\n  background: #1a8cd8;\n}\n\n.xas-lb-viewport {\n  flex: 1;\n  position: relative;\n  overflow: hidden;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  cursor: grab;\n}\n\n.xas-lb-viewport.xas-dragging {\n  cursor: grabbing;\n}\n\n.xas-lb-img {\n  max-width: none;\n  max-height: none;\n  transform-origin: center center;\n  will-change: transform;\n  -webkit-user-drag: none;\n  user-select: none;\n  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);\n}\n\n.xas-lb-footer {\n  padding: 8px 16px;\n  text-align: center;\n  font-size: 11px;\n  color: #8b98a5;\n  pointer-events: none;\n}\n\n/* Settings Modal */\n.xas-modal-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483100;\n  background: rgba(0, 0, 0, 0.65);\n  backdrop-filter: blur(4px);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 16px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n}\n\n.xas-modal {\n  width: 100%;\n  max-width: 440px;\n  background: #15202b;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  border-radius: 16px;\n  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);\n  overflow: hidden;\n}\n\n.xas-modal-head {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 18px;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.xas-modal-head h3 {\n  margin: 0;\n  font-size: 16px;\n  font-weight: 700;\n}\n\n.xas-modal-body {\n  padding: 16px 18px;\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n\n.xas-field {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  font-size: 13px;\n}\n\n.xas-field-col {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  font-size: 13px;\n}\n\n.xas-field-desc {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-top: 2px;\n}\n\n.xas-select,\n.xas-input {\n  background: #1e2d3d;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  border-radius: 8px;\n  padding: 6px 10px;\n  font: inherit;\n  font-size: 13px;\n}\n\n.xas-checkbox {\n  width: 18px;\n  height: 18px;\n  accent-color: #1d9bf0;\n  cursor: pointer;\n}\n\n.xas-modal-foot {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 18px;\n  border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n/* Toast */\n.xas-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 26px;\n  transform: translateX(-50%) translateY(12px);\n  z-index: 2147483200;\n  padding: 10px 16px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.94);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s ease, transform 0.18s ease;\n}\n\n.xas-toast.xas-toast-visible {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n\n.xas-toast.xas-toast-error {\n  border-color: rgba(244, 33, 46, 0.7);\n  color: #ff9aa2;\n}";
+  const STYLES_CSS = ".xas-root {\n  position: relative !important;\n}\n\n.xas-root.xas-active {\n  height: auto !important;\n  min-height: 0 !important;\n  overflow: visible !important;\n}\n\n.xas-root.xas-active > :not(.xas-injected) {\n  display: none !important;\n}\n\n.xas-stage {\n  position: relative;\n  width: 100%;\n  border-radius: 16px;\n  overflow: hidden;\n  background: rgba(15, 20, 25, 0.35);\n  border: 1px solid rgba(128, 128, 128, 0.22);\n  display: flex;\n  flex-direction: column;\n}\n\n.xas-stage-media {\n  position: relative;\n  width: 100%;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  background: rgba(10, 14, 18, 0.45);\n}\n\n.xas-preview {\n  display: block;\n  width: 100%;\n  height: auto;\n  max-height: 76vh;\n  object-fit: contain;\n  cursor: zoom-in;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-nav-btn {\n  appearance: none;\n  position: absolute;\n  top: 50%;\n  transform: translateY(-50%);\n  z-index: 26;\n  width: 34px;\n  height: 34px;\n  padding: 0;\n  border-radius: 999px;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(15, 20, 25, 0.72);\n  color: #eff3f4;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  backdrop-filter: blur(8px);\n  -webkit-backdrop-filter: blur(8px);\n  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);\n  opacity: 0;\n  transition: opacity 0.16s ease, background 0.14s ease, transform 0.12s ease;\n}\n\n.xas-stage-media:hover .xas-nav-btn,\n.xas-root:hover .xas-nav-btn,\n.xas-nav-btn:focus-visible {\n  opacity: 1;\n}\n\n.xas-nav-btn:hover {\n  background: rgba(29, 155, 240, 0.88);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-nav-prev {\n  left: 10px;\n}\n\n.xas-nav-next {\n  right: 10px;\n}\n\n.xas-gallery-strip {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  padding: 7px 9px;\n  background: rgba(15, 20, 25, 0.86);\n  border-top: 1px solid rgba(255, 255, 255, 0.12);\n  overflow-x: auto;\n  overflow-y: hidden;\n  scrollbar-width: thin;\n  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;\n}\n\n.xas-gallery-strip::-webkit-scrollbar {\n  height: 5px;\n}\n\n.xas-gallery-strip::-webkit-scrollbar-thumb {\n  background: rgba(255, 255, 255, 0.22);\n  border-radius: 999px;\n}\n\n.xas-thumb {\n  appearance: none;\n  position: relative;\n  flex: 0 0 auto;\n  height: 52px;\n  min-width: 40px;\n  max-width: 120px;\n  padding: 0;\n  border-radius: 8px;\n  overflow: hidden;\n  border: 2px solid rgba(255, 255, 255, 0.14);\n  background: rgba(255, 255, 255, 0.06);\n  cursor: pointer;\n  opacity: 0.72;\n  transition: opacity 0.14s ease, border-color 0.14s ease, transform 0.12s ease;\n}\n\n.xas-thumb:hover {\n  opacity: 0.96;\n  border-color: rgba(255, 255, 255, 0.42);\n}\n\n.xas-thumb.xas-thumb-stitched {\n  min-width: 72px;\n}\n\n.xas-thumb.xas-thumb-active {\n  opacity: 1;\n  border-color: #1d9bf0;\n  box-shadow: 0 0 0 1px rgba(29, 155, 240, 0.55);\n}\n\n.xas-thumb-img {\n  display: block;\n  height: 100%;\n  width: auto;\n  max-width: 120px;\n  min-width: 40px;\n  object-fit: cover;\n  pointer-events: none;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-thumb-tag {\n  position: absolute;\n  left: 3px;\n  bottom: 3px;\n  display: inline-flex;\n  align-items: center;\n  gap: 2px;\n  padding: 2px 5px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.82);\n  color: #eff3f4;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 10px;\n  font-weight: 700;\n  line-height: 1;\n  pointer-events: none;\n}\n\n.xas-thumb-stitched .xas-thumb-tag {\n  background: rgba(29, 155, 240, 0.9);\n  color: #ffffff;\n}\n\n.xas-toolbar {\n  position: absolute;\n  top: 8px;\n  right: 8px;\n  z-index: 30;\n  max-width: calc(100% - 16px);\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 12px;\n  line-height: 1;\n  pointer-events: auto;\n}\n\n.xas-pill {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  padding: 4px 6px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.78);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  backdrop-filter: blur(10px);\n  -webkit-backdrop-filter: blur(10px);\n  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);\n  opacity: 0.78;\n  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;\n}\n\n.xas-root:hover .xas-pill,\n.xas-toolbar:hover .xas-pill,\n.xas-toolbar.xas-expanded .xas-pill,\n.xas-pill.xas-suggested {\n  opacity: 1;\n}\n\n.xas-pill.xas-suggested {\n  border-color: rgba(29, 155, 240, 0.75);\n  background: rgba(15, 24, 34, 0.88);\n}\n\n.xas-pill.xas-collapsed {\n  opacity: 0.52;\n  padding: 3px 5px;\n}\n\n.xas-root:hover .xas-pill.xas-collapsed {\n  opacity: 0.95;\n}\n\n.xas-icon {\n  display: block;\n  flex-shrink: 0;\n  fill: currentColor;\n}\n\n.xas-btn {\n  appearance: none;\n  border: none;\n  background: transparent;\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 26px;\n  padding: 0 9px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 4px;\n  white-space: nowrap;\n  transition: background 0.14s ease, color 0.14s ease;\n}\n\n.xas-btn.xas-btn-icon {\n  width: 26px;\n  padding: 0;\n}\n\n.xas-btn:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.xas-btn:disabled {\n  opacity: 0.45;\n  cursor: wait;\n}\n\n.xas-btn.xas-btn-active {\n  background: #1d9bf0;\n  color: #ffffff;\n}\n\n.xas-btn.xas-btn-accent {\n  color: #6cc5ff;\n}\n\n.xas-sep {\n  width: 1px;\n  height: 14px;\n  background: rgba(255, 255, 255, 0.18);\n  margin: 0 2px;\n}\n\n.xas-order-bar {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 4px;\n  padding: 5px 8px;\n  border-radius: 12px;\n  background: rgba(15, 20, 25, 0.9);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  backdrop-filter: blur(10px);\n  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);\n}\n\n.xas-order-hint {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-right: 2px;\n}\n\n.xas-slot-chip {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.24);\n  background: rgba(255, 255, 255, 0.08);\n  color: #eff3f4;\n  font: inherit;\n  font-weight: 700;\n  min-width: 24px;\n  height: 24px;\n  padding: 0 6px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;\n}\n\n.xas-slot-chip:hover {\n  background: rgba(255, 255, 255, 0.2);\n}\n\n.xas-slot-chip.xas-slot-selected {\n  background: #1d9bf0;\n  border-color: #6cc5ff;\n  color: #fff;\n  transform: scale(1.06);\n}\n\n.xas-meta-badge {\n  position: absolute;\n  left: 10px;\n  bottom: 10px;\n  z-index: 25;\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  padding: 4px 9px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.72);\n  color: #e7e9ea;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 11px;\n  font-weight: 600;\n  border: 1px solid rgba(255, 255, 255, 0.14);\n  backdrop-filter: blur(8px);\n  pointer-events: none;\n  opacity: 0;\n  transition: opacity 0.18s ease;\n}\n\n.xas-stage:hover .xas-meta-badge,\n.xas-root:hover .xas-meta-badge {\n  opacity: 1;\n}\n\n.xas-spinner {\n  display: inline-block;\n  width: 12px;\n  height: 12px;\n  border: 2px solid rgba(255, 255, 255, 0.28);\n  border-top-color: #1d9bf0;\n  border-radius: 50%;\n  animation: xas-spin 0.75s linear infinite;\n}\n\n@keyframes xas-spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n/* Fullscreen Lightbox */\n.xas-lightbox {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  background: rgba(0, 0, 0, 0.92);\n  backdrop-filter: blur(10px);\n  display: flex;\n  flex-direction: column;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  color: #eff3f4;\n  user-select: none;\n}\n\n.xas-lb-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 18px;\n  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));\n  z-index: 2;\n}\n\n.xas-lb-title {\n  font-size: 13px;\n  font-weight: 600;\n  color: #e7e9ea;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xas-lb-actions {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-shrink: 0;\n}\n\n.xas-lb-btn {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(25, 32, 40, 0.85);\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 30px;\n  padding: 0 12px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  white-space: nowrap;\n  transition: background 0.15s ease, border-color 0.15s ease;\n}\n\n.xas-lb-btn:hover {\n  background: rgba(45, 58, 72, 0.95);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-lb-btn.xas-lb-primary {\n  background: #1d9bf0;\n  border-color: #1d9bf0;\n  color: #fff;\n}\n\n.xas-lb-btn.xas-lb-primary:hover {\n  background: #1a8cd8;\n}\n\n.xas-lb-viewport {\n  flex: 1;\n  position: relative;\n  overflow: hidden;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  cursor: grab;\n}\n\n.xas-lb-viewport.xas-dragging {\n  cursor: grabbing;\n}\n\n.xas-lb-nav {\n  appearance: none;\n  position: absolute;\n  top: 50%;\n  transform: translateY(-50%);\n  z-index: 4;\n  width: 42px;\n  height: 42px;\n  padding: 0;\n  border-radius: 999px;\n  border: 1px solid rgba(255, 255, 255, 0.22);\n  background: rgba(20, 27, 34, 0.78);\n  color: #eff3f4;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  backdrop-filter: blur(8px);\n  transition: background 0.14s ease, border-color 0.14s ease;\n}\n\n.xas-lb-nav:hover {\n  background: rgba(29, 155, 240, 0.88);\n  border-color: rgba(255, 255, 255, 0.45);\n}\n\n.xas-lb-prev {\n  left: 16px;\n}\n\n.xas-lb-next {\n  right: 16px;\n}\n\n.xas-lb-img {\n  max-width: none;\n  max-height: none;\n  transform-origin: center center;\n  will-change: transform;\n  -webkit-user-drag: none;\n  user-select: none;\n  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);\n}\n\n.xas-lb-footer {\n  padding: 8px 16px;\n  text-align: center;\n  font-size: 11px;\n  color: #8b98a5;\n  pointer-events: none;\n}\n\n/* Settings Modal */\n.xas-modal-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483100;\n  background: rgba(0, 0, 0, 0.65);\n  backdrop-filter: blur(4px);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 16px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n}\n\n.xas-modal {\n  width: 100%;\n  max-width: 440px;\n  background: #15202b;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  border-radius: 16px;\n  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);\n  overflow: hidden;\n}\n\n.xas-modal-head {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 18px;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.xas-modal-head h3 {\n  margin: 0;\n  font-size: 16px;\n  font-weight: 700;\n}\n\n.xas-modal-body {\n  padding: 16px 18px;\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n\n.xas-field {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  font-size: 13px;\n}\n\n.xas-field-col {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  font-size: 13px;\n}\n\n.xas-field-desc {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-top: 2px;\n}\n\n.xas-select,\n.xas-input {\n  background: #1e2d3d;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  border-radius: 8px;\n  padding: 6px 10px;\n  font: inherit;\n  font-size: 13px;\n}\n\n.xas-checkbox {\n  width: 18px;\n  height: 18px;\n  accent-color: #1d9bf0;\n  cursor: pointer;\n}\n\n.xas-modal-foot {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 18px;\n  border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n/* Toast */\n.xas-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 26px;\n  transform: translateX(-50%) translateY(12px);\n  z-index: 2147483200;\n  padding: 10px 16px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.94);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s ease, transform 0.18s ease;\n}\n\n.xas-toast.xas-toast-visible {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n\n.xas-toast.xas-toast-error {\n  border-color: rgba(244, 33, 46, 0.7);\n  color: #ff9aa2;\n}";
 
   // Install passive GraphQL/XHR hooks immediately at document-start before X boots.
   installGraphqlInterceptor();
@@ -2663,33 +3527,29 @@
     }
   }
 
+  async function fetchCachedOrigBlob(src) {
+    const variants = getMediaVariantUrls(src, 'orig');
+    const cacheKey = variants[0];
+    let blob = origBlobCache.get(cacheKey);
+    if (!blob) {
+      blob = await fetchBlobWithFallback(variants);
+      origBlobCache.set(cacheKey, blob);
+    }
+    return blob;
+  }
+
   async function fetchCachedOrigDecoded(urls) {
-    const blobs = await mapConcurrent(urls, 6, async (src) => {
-      const variants = getMediaVariantUrls(src, 'orig');
-      const cacheKey = variants[0];
-      let blob = origBlobCache.get(cacheKey);
-      if (!blob) {
-        blob = await fetchBlobWithFallback(variants);
-        origBlobCache.set(cacheKey, blob);
-      }
-      return blob;
-    });
+    const blobs = await mapConcurrent(urls, 6, fetchCachedOrigBlob);
     return Promise.all(blobs.map(decodeImage));
   }
 
-  async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle = config.autoUnshuffle } = {}) {
-    const cacheKey = `${gallery.signature}|${config.sensitivity}|${allowUnshuffle ? 1 : 0}`;
-    if (!forceRecompute) {
-      const cached = analysisCache.get(cacheKey);
-      if (cached) return cached;
-    }
-
-    const rgbaList = await mapConcurrent(gallery.urls, 6, async (src, idx) => {
+  async function fetchThumbRgba(urls, origDims) {
+    return mapConcurrent(urls, 6, async (src, idx) => {
       const blob = await fetchBlobWithFallback(getMediaVariantUrls(src, 'thumb'));
       const decoded = await decodeImage(blob);
       try {
         const rgba = extractRgbaFromDecoded(decoded, 480);
-        const knownDim = gallery.origDims?.[idx];
+        const knownDim = origDims?.[idx];
         if (knownDim?.width > 0 && knownDim?.height > 0) {
           rgba.origWidth = knownDim.width;
           rgba.origHeight = knownDim.height;
@@ -2699,7 +3559,16 @@
         decoded.close();
       }
     });
+  }
 
+  async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle = config.autoUnshuffle } = {}) {
+    const cacheKey = `${gallery.signature}|${config.sensitivity}|${allowUnshuffle ? 1 : 0}`;
+    if (!forceRecompute) {
+      const cached = analysisCache.get(cacheKey);
+      if (cached) return cached;
+    }
+
+    const rgbaList = await fetchThumbRgba(gallery.urls, gallery.origDims);
     const thresholds = getThresholds(config.sensitivity);
     const result = detectSplitArtwork(rgbaList, {
       ...thresholds,
@@ -2711,7 +3580,11 @@
       tweetId: gallery.tweetId,
       count: gallery.urls.length,
       isMatch: result.isMatch,
+      isPartial: result.isPartial,
       wasUnshuffled: result.wasUnshuffled,
+      groups: result.groups?.map((g) =>
+        g.type === 'stitched' ? { type: 'stitched', indices: g.indices, layout: g.layout } : g,
+      ),
       winner: result.winner
         ? {
             layout: result.winner.layout,
@@ -2728,78 +3601,127 @@
     return result;
   }
 
+  function refreshRevokedEntry(item) {
+    if (item?.type !== 'stitched' || !item.entry?.revoked || !item.pngBlob) return;
+    const freshUrl = URL.createObjectURL(item.pngBlob);
+    const freshEntry = {
+      objectUrl: freshUrl,
+      pngBlob: item.pngBlob,
+      width: item.width,
+      height: item.height,
+      revoked: false,
+    };
+    item.entry = freshEntry;
+    item.objectUrl = freshUrl;
+    if (item.previewKey) {
+      previewUrlCache.set(item.previewKey, freshEntry);
+    }
+  }
+
   function createGalleryController(gallery) {
     let analysis = null;
-    let currentRender = null;
+    let galleryItems = null; // Array of rendered stitched/single items when active
+    let activeIndex = 0;
     let renderSeq = 0;
 
-    const ensureCurrentCanvas = async () => {
-      if (!currentRender) throw new Error('No stitched image is currently active');
-      const decoded = await fetchCachedOrigDecoded(gallery.urls);
+    const getActiveItem = (idx = activeIndex) => (galleryItems ? galleryItems[idx] || null : null);
+
+    const buildStitchedItem = async (indices, layout, order, wasUnshuffled) => {
+      const previewKey = `${gallery.signature}|${indices.join(',')}|${layout}|${order.join(',')}`;
+      const cached = previewUrlCache.get(previewKey);
+      if (cached && !cached.revoked) {
+        return {
+          type: 'stitched',
+          indices: indices.slice(),
+          layout,
+          order: order.slice(),
+          wasUnshuffled: Boolean(wasUnshuffled),
+          entry: cached,
+          previewKey,
+          objectUrl: cached.objectUrl,
+          pngBlob: cached.pngBlob,
+          width: cached.width,
+          height: cached.height,
+        };
+      }
+
+      const subsetUrls = indices.map((idx) => gallery.urls[idx]);
+      const decoded = await fetchCachedOrigDecoded(subsetUrls);
+      let canvas;
+      let width;
+      let height;
       try {
-        return renderStitchedCanvas(decoded, currentRender.layout, currentRender.order);
+        ({ canvas, width, height } = renderStitchedCanvas(decoded, layout, order));
+      } finally {
+        decoded.forEach((d) => d.close());
+      }
+
+      const pngBlob = await canvasToBlob(canvas, 'png');
+      const objectUrl = URL.createObjectURL(pngBlob);
+      const entry = { objectUrl, pngBlob, width, height, revoked: false };
+      previewUrlCache.set(previewKey, entry);
+
+      return {
+        type: 'stitched',
+        indices: indices.slice(),
+        layout,
+        order: order.slice(),
+        wasUnshuffled: Boolean(wasUnshuffled),
+        entry,
+        previewKey,
+        objectUrl,
+        pngBlob,
+        width,
+        height,
+      };
+    };
+
+    const buildSingleItem = (index) => {
+      const src = gallery.urls[index];
+      const dim = gallery.origDims?.[index];
+      return {
+        type: 'single',
+        index,
+        url: buildMediaUrl(src, 'large'),
+        thumbUrl: buildMediaUrl(src, 'small'),
+        width: dim?.width || 0,
+        height: dim?.height || 0,
+      };
+    };
+
+    const renderCanvasForStitchedItem = async (item) => {
+      const subsetUrls = item.indices.map((idx) => gallery.urls[idx]);
+      const decoded = await fetchCachedOrigDecoded(subsetUrls);
+      try {
+        return renderStitchedCanvas(decoded, item.layout, item.order);
       } finally {
         decoded.forEach((d) => d.close());
       }
     };
 
-    const renderStitched = async (layout, customOrder = null, wasUnshuffled = false) => {
+    const renderSingleGroupView = async (layout, customOrder = null, wasUnshuffled = false) => {
       const seq = ++renderSeq;
+      const allIndices = Array.from({ length: gallery.urls.length }, (_, i) => i);
       const order =
         customOrder ||
-        (analysis?.bestByLayout?.[layout] && config.autoUnshuffle && analysis.isMatch && analysis.winner?.layout === layout
+        (!analysis?.isPartial &&
+        analysis?.bestByLayout?.[layout] &&
+        config.autoUnshuffle &&
+        analysis.isMatch &&
+        analysis.winner?.layout === layout
           ? analysis.winner.order
-          : Array.from({ length: gallery.urls.length }, (_, i) => i));
+          : allIndices);
 
-      const previewKey = `${gallery.signature}|${layout}|${order.join(',')}`;
-      const cachedPreview = previewUrlCache.get(previewKey);
-      if (cachedPreview && !cachedPreview.revoked) {
-        currentRender = {
-          entry: cachedPreview,
-          previewKey,
-          objectUrl: cachedPreview.objectUrl,
-          pngBlob: cachedPreview.pngBlob,
-          width: cachedPreview.width,
-          height: cachedPreview.height,
-          layout,
-          order: order.slice(),
-          wasUnshuffled,
-        };
-        ui.showStitched(currentRender);
-        return;
-      }
+      const previewKey = `${gallery.signature}|${allIndices.join(',')}|${layout}|${order.join(',')}`;
+      const cached = previewUrlCache.get(previewKey);
+      if (!cached || cached.revoked) ui.setBusy(true);
 
-      ui.setBusy(true);
       try {
-        const decoded = await fetchCachedOrigDecoded(gallery.urls);
-        let canvas;
-        let width;
-        let height;
-        try {
-          ({ canvas, width, height } = renderStitchedCanvas(decoded, layout, order));
-        } finally {
-          decoded.forEach((d) => d.close());
-        }
-
-        const pngBlob = await canvasToBlob(canvas, 'png');
+        const item = await buildStitchedItem(allIndices, layout, order, wasUnshuffled);
         if (seq !== renderSeq) return;
-
-        const objectUrl = URL.createObjectURL(pngBlob);
-        const entry = { objectUrl, pngBlob, width, height, revoked: false };
-        previewUrlCache.set(previewKey, entry);
-
-        currentRender = {
-          entry,
-          previewKey,
-          objectUrl,
-          pngBlob,
-          width,
-          height,
-          layout,
-          order: order.slice(),
-          wasUnshuffled,
-        };
-        ui.showStitched(currentRender);
+        galleryItems = [item];
+        activeIndex = 0;
+        ui.showGallery({ items: galleryItems, activeIndex });
       } catch (err) {
         console.error('[XAS] Stitch render failed:', err);
         ui.setBusy(false);
@@ -2807,19 +3729,104 @@
       }
     };
 
-    const handleDownload = async () => {
-      if (!currentRender) return;
+    const renderMixedGallery = async (groupDescriptors) => {
+      const seq = ++renderSeq;
+      ui.setBusy(true);
+      try {
+        const items = await Promise.all(
+          groupDescriptors.map((grp) => {
+            if (grp.type === 'stitched') {
+              return buildStitchedItem(grp.indices, grp.layout, grp.order, grp.wasUnshuffled);
+            }
+            return buildSingleItem(grp.index);
+          }),
+        );
+        if (seq !== renderSeq) return;
+        const firstStitchedIdx = Math.max(
+          0,
+          items.findIndex((item) => item.type === 'stitched'),
+        );
+        galleryItems = items;
+        activeIndex = firstStitchedIdx;
+        ui.showGallery({ items: galleryItems, activeIndex });
+      } catch (err) {
+        console.error('[XAS] Mixed gallery render failed:', err);
+        ui.setBusy(false);
+        showToast(`Stitch failed: ${err.message}`, true);
+      }
+    };
+
+    const updateActiveStitchedGroup = async (layout, customOrder = null, wasUnshuffled = false) => {
+      const current = getActiveItem();
+      if (!current || current.type !== 'stitched' || galleryItems.length <= 1) {
+        return renderSingleGroupView(layout, customOrder, wasUnshuffled);
+      }
+
+      const seq = ++renderSeq;
+      const targetIdx = activeIndex;
+      const indices = current.indices;
+      const order = customOrder || Array.from({ length: indices.length }, (_, i) => i);
+
+      const previewKey = `${gallery.signature}|${indices.join(',')}|${layout}|${order.join(',')}`;
+      const cached = previewUrlCache.get(previewKey);
+      if (!cached || cached.revoked) ui.setBusy(true);
+
+      try {
+        const nextItem = await buildStitchedItem(indices, layout, order, wasUnshuffled);
+        if (seq !== renderSeq || !galleryItems) return;
+        galleryItems = galleryItems.slice();
+        galleryItems[targetIdx] = nextItem;
+        ui.showGallery({ items: galleryItems, activeIndex: targetIdx });
+      } catch (err) {
+        console.error('[XAS] Group re-stitch failed:', err);
+        ui.setBusy(false);
+        showToast(`Stitch failed: ${err.message}`, true);
+      }
+    };
+
+    const handleDownload = async (idx = activeIndex) => {
+      const item = getActiveItem(idx);
+      if (!item) return;
       try {
         const format = config.downloadFormat || 'png';
-        let blob = currentRender.pngBlob;
-        if (format !== 'png') {
-          const { canvas } = await ensureCurrentCanvas();
-          blob = await canvasToBlob(canvas, format, config.downloadQuality);
+        let blob;
+        let layoutTag;
+
+        if (item.type === 'stitched') {
+          blob = item.pngBlob;
+          if (format !== 'png') {
+            const { canvas } = await renderCanvasForStitchedItem(item);
+            blob = await canvasToBlob(canvas, format, config.downloadQuality);
+          }
+          layoutTag =
+            galleryItems.length > 1
+              ? `${item.layout}_p${formatIndexRange(item.indices).replace(/–/g, '-')}`
+              : item.layout;
+        } else {
+          const origBlob = await fetchCachedOrigBlob(gallery.urls[item.index]);
+          const targetMime =
+            format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+          if (origBlob.type === targetMime) {
+            blob = origBlob;
+          } else {
+            const decoded = await decodeImage(origBlob);
+            try {
+              const canvas = document.createElement('canvas');
+              canvas.width = decoded.width;
+              canvas.height = decoded.height;
+              canvas.getContext('2d').drawImage(decoded.source, 0, 0);
+              blob = await canvasToBlob(canvas, format, config.downloadQuality);
+            } finally {
+              decoded.close();
+            }
+          }
+          layoutTag = `p${item.index + 1}`;
         }
+
         const filename = formatFilename(config.filenameTemplate, {
           handle: gallery.handle,
           tweetId: gallery.tweetId,
-          layout: currentRender.layout,
+          layout: layoutTag,
           ext: format,
         });
         downloadBlob(blob, filename);
@@ -2830,60 +3837,124 @@
       }
     };
 
-    const handleCopy = async () => {
-      if (!currentRender) return;
+    const handleCopy = async (idx = activeIndex) => {
+      const item = getActiveItem(idx);
+      if (!item) return;
       try {
-        await copyPngBlobToClipboard(currentRender.pngBlob);
-        showToast('Copied stitched PNG to clipboard');
+        if (item.type === 'stitched') {
+          await copyPngBlobToClipboard(item.pngBlob);
+          showToast('Copied stitched PNG to clipboard');
+          return;
+        }
+
+        const pngPromise = (async () => {
+          const origBlob = await fetchCachedOrigBlob(gallery.urls[item.index]);
+          if (origBlob.type === 'image/png') return origBlob;
+          const decoded = await decodeImage(origBlob);
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = decoded.width;
+            canvas.height = decoded.height;
+            canvas.getContext('2d').drawImage(decoded.source, 0, 0);
+            return await canvasToBlob(canvas, 'png');
+          } finally {
+            decoded.close();
+          }
+        })();
+        await copyPngBlobToClipboard(pngPromise);
+        showToast('Copied PNG to clipboard');
       } catch (err) {
         console.error('[XAS] Clipboard copy failed:', err);
         showToast(`Clipboard copy failed: ${err.message}`, true);
       }
     };
 
+    const handleSelectGalleryItem = (idx) => {
+      if (!galleryItems || idx < 0 || idx >= galleryItems.length) return;
+      activeIndex = idx;
+      refreshRevokedEntry(galleryItems[activeIndex]);
+      ui.showGallery({ items: galleryItems, activeIndex });
+    };
+
     const handleOpenLightbox = () => {
-      if (!currentRender) return;
-      if (currentRender.entry?.revoked && currentRender.pngBlob) {
-        const freshUrl = URL.createObjectURL(currentRender.pngBlob);
-        const freshEntry = {
-          objectUrl: freshUrl,
-          pngBlob: currentRender.pngBlob,
-          width: currentRender.width,
-          height: currentRender.height,
-          revoked: false,
-        };
-        currentRender.entry = freshEntry;
-        currentRender.objectUrl = freshUrl;
-        if (currentRender.previewKey) {
-          previewUrlCache.set(currentRender.previewKey, freshEntry);
+      if (!galleryItems || galleryItems.length === 0) return;
+      const isMulti = galleryItems.length > 1;
+      const lbItems = galleryItems.map((item) => {
+        if (item.type === 'stitched') {
+          refreshRevokedEntry(item);
+          const rangePart = isMulti ? ` · #${formatIndexRange(item.indices)}` : '';
+          return {
+            url: item.objectUrl,
+            title: `@${gallery.handle}${rangePart} · ${getLayoutLabel(item.layout)}`,
+            width: item.width,
+            height: item.height,
+          };
         }
-      }
+        return {
+          url: buildMediaUrl(gallery.urls[item.index], 'orig'),
+          title: `@${gallery.handle} · #${item.index + 1}`,
+          width: item.width,
+          height: item.height,
+        };
+      });
+
       openLightbox({
-        url: currentRender.objectUrl,
-        title: `@${gallery.handle} · ${getLayoutLabel(currentRender.layout)}`,
-        width: currentRender.width,
-        height: currentRender.height,
-        onDownload: handleDownload,
-        onCopy: handleCopy,
+        items: lbItems,
+        activeIndex,
+        onSelectIndex: (nextIdx) => {
+          if (galleryItems && nextIdx >= 0 && nextIdx < galleryItems.length) {
+            activeIndex = nextIdx;
+            ui.showGallery({ items: galleryItems, activeIndex });
+          }
+        },
+        onDownload: (idx) => handleDownload(idx),
+        onCopy: (idx) => handleCopy(idx),
       });
     };
 
     const handleAutoSolve = async (forcedLayout = null) => {
+      const current = getActiveItem();
+      const isMixedGroupOrderSolve = Boolean(
+        forcedLayout && current && current.type === 'stitched' && galleryItems && galleryItems.length > 1,
+      );
+
       ui.setBusy(true);
       try {
+        if (isMixedGroupOrderSolve) {
+          const subsetUrls = current.indices.map((i) => gallery.urls[i]);
+          const subsetDims = current.indices.map((i) => gallery.origDims?.[i]);
+          const rgbaList = await fetchThumbRgba(subsetUrls, subsetDims);
+          const subResult = detectSplitArtwork(rgbaList, {
+            ...getThresholds(config.sensitivity),
+            allowUnshuffle: true,
+          });
+          const cand = subResult.bestByLayout?.[forcedLayout];
+          if (cand) {
+            const unshuffled = cand.order.some((v, idx) => v !== idx);
+            await updateActiveStitchedGroup(forcedLayout, cand.order, unshuffled);
+            return;
+          }
+          await updateActiveStitchedGroup(forcedLayout);
+          return;
+        }
+
         analysis = await analyzeGallery(gallery, { forceRecompute: true, allowUnshuffle: true });
         if (forcedLayout && analysis.bestByLayout[forcedLayout]) {
           const cand = analysis.bestByLayout[forcedLayout];
           const unshuffled = cand.order.some((v, idx) => v !== idx);
-          await renderStitched(forcedLayout, cand.order, unshuffled);
+          await renderSingleGroupView(forcedLayout, cand.order, unshuffled);
+          return;
+        }
+        if (analysis.isMatch && analysis.isPartial && analysis.groups?.length > 0) {
+          await renderMixedGallery(analysis.groups);
           return;
         }
         if (analysis.winner) {
           const unshuffled = analysis.winner.order.some((v, idx) => v !== idx);
-          await renderStitched(analysis.winner.layout, analysis.winner.order, unshuffled);
+          await renderSingleGroupView(analysis.winner.layout, analysis.winner.order, unshuffled);
         } else {
           const fallbackLayout = getAvailableLayouts(gallery.urls.length)[0];
-          await renderStitched(fallbackLayout);
+          await renderSingleGroupView(fallbackLayout);
         }
       } catch (err) {
         console.error('[XAS] Auto-solve failed:', err);
@@ -2894,23 +3965,29 @@
 
     const ui = createGalleryUI(gallery, {
       onSelectLayout(layout, customOrder, wasUnshuffled) {
-        renderStitched(layout, customOrder, wasUnshuffled);
+        updateActiveStitchedGroup(layout, customOrder, wasUnshuffled);
       },
+      onOpenMixedGallery(groups) {
+        renderMixedGallery(groups);
+      },
+      onSelectGalleryItem: handleSelectGalleryItem,
       onAutoSolve(forcedLayout) {
         handleAutoSolve(forcedLayout);
       },
       onChangeOrder(nextOrder) {
-        if (!currentRender) return;
-        renderStitched(currentRender.layout, nextOrder, false);
+        const current = getActiveItem();
+        if (!current || current.type !== 'stitched') return;
+        updateActiveStitchedGroup(current.layout, nextOrder, false);
       },
       onRestoreOriginal() {
         renderSeq++;
-        currentRender = null;
+        galleryItems = null;
+        activeIndex = 0;
         ui.showOriginal();
       },
       onOpenLightbox: handleOpenLightbox,
-      onDownload: handleDownload,
-      onCopy: handleCopy,
+      onDownload: () => handleDownload(activeIndex),
+      onCopy: () => handleCopy(activeIndex),
       onOpenSettings: openSettings,
     });
 
@@ -2924,17 +4001,34 @@
         .then((result) => {
           analysis = result;
           if (!gallery.container.isConnected) return;
-          if (!result.isMatch || !result.winner) return;
+          if (!result.isMatch) return;
 
+          if (result.isPartial && result.groups?.length > 0) {
+            const stitchedGroups = result.groups.filter((g) => g.type === 'stitched');
+            if (stitchedGroups.length === 0) return;
+            ui.setSuggested({
+              isPartial: true,
+              groups: result.groups,
+              stitchedCount: stitchedGroups.length,
+              primaryGroup: stitchedGroups[0],
+            });
+            if (config.autoStitch && !galleryItems) {
+              renderMixedGallery(result.groups);
+            }
+            return;
+          }
+
+          if (!result.winner) return;
           const suggestion = {
+            isPartial: false,
             layout: result.winner.layout,
             order: result.winner.order,
             wasUnshuffled: result.wasUnshuffled,
           };
           ui.setSuggested(suggestion);
 
-          if (config.autoStitch && !currentRender) {
-            renderStitched(suggestion.layout, suggestion.order, suggestion.wasUnshuffled);
+          if (config.autoStitch && !galleryItems) {
+            renderSingleGroupView(suggestion.layout, suggestion.order, suggestion.wasUnshuffled);
           }
         })
         .catch((err) => {

@@ -28,6 +28,11 @@ function stripModuleSyntax(source) {
   return cleaned.trim();
 }
 
+function toTemplateLiteral(text) {
+  const escaped = text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+  return `\`\n${escaped}\n\``;
+}
+
 function build() {
   const meta = fs.readFileSync(path.join(SRC_DIR, 'meta.js'), 'utf8').trim();
   const stylesCss = fs.readFileSync(path.join(SRC_DIR, 'styles.css'), 'utf8').trim();
@@ -36,7 +41,7 @@ function build() {
     const raw = fs.readFileSync(path.join(SRC_DIR, filename), 'utf8');
     let code = stripModuleSyntax(raw);
     if (filename === 'main.js') {
-      code = code.replace("'__XAS_STYLES_CSS__'", JSON.stringify(stylesCss));
+      code = code.replace("'__XAS_STYLES_CSS__'", toTemplateLiteral(stylesCss));
     }
     return `  // --- ${filename} ---\n${code
       .split('\n')

@@ -7,6 +7,7 @@
 // @description:zh-CN 自动识别并拼合 X (Twitter) 上画师发布的多图/四宫格/长图/多图轮播及防 AI 乱序切片作品，支持高清灯箱预览、原图下载与一键复制。
 // @author            anfsity
 // @license           Apache-2.0
+// @icon              data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0iIzFkOWJmMCIvPjxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDQgNCkiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik0zIDN2OGg4VjNIM3ptNiA2SDVWNWg0djR6TTMgMTN2OGg4di04SDN6bTYgNkg1di00aDR2NHpNMTMgM3Y4aDhWM2gtOHptNiA2aC00VjVoNHY0ek0xMyAxM3Y4aDh2LThoLTh6bTYgNmgtNHYtNGg0djR6Ii8+PC9nPjwvc3ZnPg==
 // @homepageURL       https://github.com/anfsity/x-art-stitcher
 // @supportURL        https://github.com/anfsity/x-art-stitcher/issues
 // @updateURL         https://raw.githubusercontent.com/anfsity/x-art-stitcher/main/dist/x-art-stitcher.user.js
@@ -21,7 +22,6 @@
 // @grant             GM_getValue
 // @grant             GM_setValue
 // @grant             GM_registerMenuCommand
-// @grant             GM_download
 // @grant             unsafeWindow
 // @run-at            document-start
 // ==/UserScript==
@@ -3427,7 +3427,649 @@
 
   // --- main.js ---
   // Replaced at build time with contents of src/styles.css.
-  const STYLES_CSS = ".xas-root {\n  position: relative !important;\n}\n\n.xas-root.xas-active {\n  height: auto !important;\n  min-height: 0 !important;\n  overflow: visible !important;\n}\n\n.xas-root.xas-active > :not(.xas-injected) {\n  display: none !important;\n}\n\n.xas-stage {\n  position: relative;\n  width: 100%;\n  border-radius: 16px;\n  overflow: hidden;\n  background: rgba(15, 20, 25, 0.35);\n  border: 1px solid rgba(128, 128, 128, 0.22);\n  display: flex;\n  flex-direction: column;\n}\n\n.xas-stage-media {\n  position: relative;\n  width: 100%;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  background: rgba(10, 14, 18, 0.45);\n}\n\n.xas-preview {\n  display: block;\n  width: 100%;\n  height: auto;\n  max-height: 76vh;\n  object-fit: contain;\n  cursor: zoom-in;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-nav-btn {\n  appearance: none;\n  position: absolute;\n  top: 50%;\n  transform: translateY(-50%);\n  z-index: 26;\n  width: 34px;\n  height: 34px;\n  padding: 0;\n  border-radius: 999px;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(15, 20, 25, 0.72);\n  color: #eff3f4;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  backdrop-filter: blur(8px);\n  -webkit-backdrop-filter: blur(8px);\n  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);\n  opacity: 0;\n  transition: opacity 0.16s ease, background 0.14s ease, transform 0.12s ease;\n}\n\n.xas-stage-media:hover .xas-nav-btn,\n.xas-root:hover .xas-nav-btn,\n.xas-nav-btn:focus-visible {\n  opacity: 1;\n}\n\n.xas-nav-btn:hover {\n  background: rgba(29, 155, 240, 0.88);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-nav-prev {\n  left: 10px;\n}\n\n.xas-nav-next {\n  right: 10px;\n}\n\n.xas-gallery-strip {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  padding: 7px 9px;\n  background: rgba(15, 20, 25, 0.86);\n  border-top: 1px solid rgba(255, 255, 255, 0.12);\n  overflow-x: auto;\n  overflow-y: hidden;\n  scrollbar-width: thin;\n  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;\n}\n\n.xas-gallery-strip::-webkit-scrollbar {\n  height: 5px;\n}\n\n.xas-gallery-strip::-webkit-scrollbar-thumb {\n  background: rgba(255, 255, 255, 0.22);\n  border-radius: 999px;\n}\n\n.xas-thumb {\n  appearance: none;\n  position: relative;\n  flex: 0 0 auto;\n  height: 52px;\n  min-width: 40px;\n  max-width: 120px;\n  padding: 0;\n  border-radius: 8px;\n  overflow: hidden;\n  border: 2px solid rgba(255, 255, 255, 0.14);\n  background: rgba(255, 255, 255, 0.06);\n  cursor: pointer;\n  opacity: 0.72;\n  transition: opacity 0.14s ease, border-color 0.14s ease, transform 0.12s ease;\n}\n\n.xas-thumb:hover {\n  opacity: 0.96;\n  border-color: rgba(255, 255, 255, 0.42);\n}\n\n.xas-thumb.xas-thumb-stitched {\n  min-width: 72px;\n}\n\n.xas-thumb.xas-thumb-active {\n  opacity: 1;\n  border-color: #1d9bf0;\n  box-shadow: 0 0 0 1px rgba(29, 155, 240, 0.55);\n}\n\n.xas-thumb-img {\n  display: block;\n  height: 100%;\n  width: auto;\n  max-width: 120px;\n  min-width: 40px;\n  object-fit: cover;\n  pointer-events: none;\n  user-select: none;\n  -webkit-user-drag: none;\n}\n\n.xas-thumb-tag {\n  position: absolute;\n  left: 3px;\n  bottom: 3px;\n  display: inline-flex;\n  align-items: center;\n  gap: 2px;\n  padding: 2px 5px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.82);\n  color: #eff3f4;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 10px;\n  font-weight: 700;\n  line-height: 1;\n  pointer-events: none;\n}\n\n.xas-thumb-stitched .xas-thumb-tag {\n  background: rgba(29, 155, 240, 0.9);\n  color: #ffffff;\n}\n\n.xas-toolbar {\n  position: absolute;\n  top: 8px;\n  right: 8px;\n  z-index: 30;\n  max-width: calc(100% - 16px);\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 6px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 12px;\n  line-height: 1;\n  pointer-events: auto;\n}\n\n.xas-pill {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  justify-content: flex-end;\n  gap: 3px;\n  padding: 4px 6px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.78);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  backdrop-filter: blur(10px);\n  -webkit-backdrop-filter: blur(10px);\n  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);\n  opacity: 0.78;\n  transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;\n}\n\n.xas-root:hover .xas-pill,\n.xas-toolbar:hover .xas-pill,\n.xas-toolbar.xas-expanded .xas-pill,\n.xas-pill.xas-suggested {\n  opacity: 1;\n}\n\n.xas-pill.xas-suggested {\n  border-color: rgba(29, 155, 240, 0.75);\n  background: rgba(15, 24, 34, 0.88);\n}\n\n.xas-pill.xas-collapsed {\n  opacity: 0.52;\n  padding: 3px 5px;\n}\n\n.xas-root:hover .xas-pill.xas-collapsed {\n  opacity: 0.95;\n}\n\n.xas-icon {\n  display: block;\n  flex-shrink: 0;\n  fill: currentColor;\n}\n\n.xas-btn {\n  appearance: none;\n  border: none;\n  background: transparent;\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 26px;\n  padding: 0 9px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 4px;\n  white-space: nowrap;\n  transition: background 0.14s ease, color 0.14s ease;\n}\n\n.xas-btn.xas-btn-icon {\n  width: 26px;\n  padding: 0;\n}\n\n.xas-btn:hover {\n  background: rgba(255, 255, 255, 0.15);\n}\n\n.xas-btn:disabled {\n  opacity: 0.45;\n  cursor: wait;\n}\n\n.xas-btn.xas-btn-active {\n  background: #1d9bf0;\n  color: #ffffff;\n}\n\n.xas-btn.xas-btn-accent {\n  color: #6cc5ff;\n}\n\n.xas-sep {\n  width: 1px;\n  height: 14px;\n  background: rgba(255, 255, 255, 0.18);\n  margin: 0 2px;\n}\n\n.xas-order-bar {\n  display: inline-flex;\n  flex-wrap: wrap;\n  align-items: center;\n  gap: 4px;\n  padding: 5px 8px;\n  border-radius: 12px;\n  background: rgba(15, 20, 25, 0.9);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  backdrop-filter: blur(10px);\n  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);\n}\n\n.xas-order-hint {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-right: 2px;\n}\n\n.xas-slot-chip {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.24);\n  background: rgba(255, 255, 255, 0.08);\n  color: #eff3f4;\n  font: inherit;\n  font-weight: 700;\n  min-width: 24px;\n  height: 24px;\n  padding: 0 6px;\n  border-radius: 8px;\n  cursor: pointer;\n  transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;\n}\n\n.xas-slot-chip:hover {\n  background: rgba(255, 255, 255, 0.2);\n}\n\n.xas-slot-chip.xas-slot-selected {\n  background: #1d9bf0;\n  border-color: #6cc5ff;\n  color: #fff;\n  transform: scale(1.06);\n}\n\n.xas-meta-badge {\n  position: absolute;\n  left: 10px;\n  bottom: 10px;\n  z-index: 25;\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  padding: 4px 9px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.72);\n  color: #e7e9ea;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 11px;\n  font-weight: 600;\n  border: 1px solid rgba(255, 255, 255, 0.14);\n  backdrop-filter: blur(8px);\n  pointer-events: none;\n  opacity: 0;\n  transition: opacity 0.18s ease;\n}\n\n.xas-stage:hover .xas-meta-badge,\n.xas-root:hover .xas-meta-badge {\n  opacity: 1;\n}\n\n.xas-spinner {\n  display: inline-block;\n  width: 12px;\n  height: 12px;\n  border: 2px solid rgba(255, 255, 255, 0.28);\n  border-top-color: #1d9bf0;\n  border-radius: 50%;\n  animation: xas-spin 0.75s linear infinite;\n}\n\n@keyframes xas-spin {\n  to {\n    transform: rotate(360deg);\n  }\n}\n\n/* Fullscreen Lightbox */\n.xas-lightbox {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483000;\n  background: rgba(0, 0, 0, 0.92);\n  backdrop-filter: blur(10px);\n  display: flex;\n  flex-direction: column;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  color: #eff3f4;\n  user-select: none;\n}\n\n.xas-lb-header {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  padding: 12px 18px;\n  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));\n  z-index: 2;\n}\n\n.xas-lb-title {\n  font-size: 13px;\n  font-weight: 600;\n  color: #e7e9ea;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.xas-lb-actions {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  flex-shrink: 0;\n}\n\n.xas-lb-btn {\n  appearance: none;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  background: rgba(25, 32, 40, 0.85);\n  color: #eff3f4;\n  font: inherit;\n  font-size: 12px;\n  font-weight: 600;\n  height: 30px;\n  padding: 0 12px;\n  border-radius: 999px;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 5px;\n  white-space: nowrap;\n  transition: background 0.15s ease, border-color 0.15s ease;\n}\n\n.xas-lb-btn:hover {\n  background: rgba(45, 58, 72, 0.95);\n  border-color: rgba(255, 255, 255, 0.35);\n}\n\n.xas-lb-btn.xas-lb-primary {\n  background: #1d9bf0;\n  border-color: #1d9bf0;\n  color: #fff;\n}\n\n.xas-lb-btn.xas-lb-primary:hover {\n  background: #1a8cd8;\n}\n\n.xas-lb-viewport {\n  flex: 1;\n  position: relative;\n  overflow: hidden;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  cursor: grab;\n}\n\n.xas-lb-viewport.xas-dragging {\n  cursor: grabbing;\n}\n\n.xas-lb-nav {\n  appearance: none;\n  position: absolute;\n  top: 50%;\n  transform: translateY(-50%);\n  z-index: 4;\n  width: 42px;\n  height: 42px;\n  padding: 0;\n  border-radius: 999px;\n  border: 1px solid rgba(255, 255, 255, 0.22);\n  background: rgba(20, 27, 34, 0.78);\n  color: #eff3f4;\n  cursor: pointer;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  backdrop-filter: blur(8px);\n  transition: background 0.14s ease, border-color 0.14s ease;\n}\n\n.xas-lb-nav:hover {\n  background: rgba(29, 155, 240, 0.88);\n  border-color: rgba(255, 255, 255, 0.45);\n}\n\n.xas-lb-prev {\n  left: 16px;\n}\n\n.xas-lb-next {\n  right: 16px;\n}\n\n.xas-lb-img {\n  max-width: none;\n  max-height: none;\n  transform-origin: center center;\n  will-change: transform;\n  -webkit-user-drag: none;\n  user-select: none;\n  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);\n}\n\n.xas-lb-footer {\n  padding: 8px 16px;\n  text-align: center;\n  font-size: 11px;\n  color: #8b98a5;\n  pointer-events: none;\n}\n\n/* Settings Modal */\n.xas-modal-backdrop {\n  position: fixed;\n  inset: 0;\n  z-index: 2147483100;\n  background: rgba(0, 0, 0, 0.65);\n  backdrop-filter: blur(4px);\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 16px;\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n}\n\n.xas-modal {\n  width: 100%;\n  max-width: 440px;\n  background: #15202b;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.16);\n  border-radius: 16px;\n  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);\n  overflow: hidden;\n}\n\n.xas-modal-head {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 14px 18px;\n  border-bottom: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.xas-modal-head h3 {\n  margin: 0;\n  font-size: 16px;\n  font-weight: 700;\n}\n\n.xas-modal-body {\n  padding: 16px 18px;\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n\n.xas-field {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  font-size: 13px;\n}\n\n.xas-field-col {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n  font-size: 13px;\n}\n\n.xas-field-desc {\n  font-size: 11px;\n  color: #8b98a5;\n  margin-top: 2px;\n}\n\n.xas-select,\n.xas-input {\n  background: #1e2d3d;\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  border-radius: 8px;\n  padding: 6px 10px;\n  font: inherit;\n  font-size: 13px;\n}\n\n.xas-checkbox {\n  width: 18px;\n  height: 18px;\n  accent-color: #1d9bf0;\n  cursor: pointer;\n}\n\n.xas-modal-foot {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding: 12px 18px;\n  border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n/* Toast */\n.xas-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 26px;\n  transform: translateX(-50%) translateY(12px);\n  z-index: 2147483200;\n  padding: 10px 16px;\n  border-radius: 999px;\n  background: rgba(15, 20, 25, 0.94);\n  color: #eff3f4;\n  border: 1px solid rgba(255, 255, 255, 0.18);\n  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif;\n  font-size: 13px;\n  font-weight: 600;\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s ease, transform 0.18s ease;\n}\n\n.xas-toast.xas-toast-visible {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n\n.xas-toast.xas-toast-error {\n  border-color: rgba(244, 33, 46, 0.7);\n  color: #ff9aa2;\n}";
+  const STYLES_CSS = `
+  .xas-root {
+    position: relative !important;
+  }
+
+  .xas-root.xas-active {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+  }
+
+  .xas-root.xas-active > :not(.xas-injected) {
+    display: none !important;
+  }
+
+  .xas-stage {
+    position: relative;
+    width: 100%;
+    border-radius: 16px;
+    overflow: hidden;
+    background: rgba(15, 20, 25, 0.35);
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .xas-stage-media {
+    position: relative;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 14, 18, 0.45);
+  }
+
+  .xas-preview {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 76vh;
+    object-fit: contain;
+    cursor: zoom-in;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  .xas-nav-btn {
+    appearance: none;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 26;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(15, 20, 25, 0.72);
+    color: #eff3f4;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    opacity: 0;
+    transition: opacity 0.16s ease, background 0.14s ease, transform 0.12s ease;
+  }
+
+  .xas-stage-media:hover .xas-nav-btn,
+  .xas-root:hover .xas-nav-btn,
+  .xas-nav-btn:focus-visible {
+    opacity: 1;
+  }
+
+  .xas-nav-btn:hover {
+    background: rgba(29, 155, 240, 0.88);
+    border-color: rgba(255, 255, 255, 0.35);
+  }
+
+  .xas-nav-prev {
+    left: 10px;
+  }
+
+  .xas-nav-next {
+    right: 10px;
+  }
+
+  .xas-gallery-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 9px;
+    background: rgba(15, 20, 25, 0.86);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  }
+
+  .xas-gallery-strip::-webkit-scrollbar {
+    height: 5px;
+  }
+
+  .xas-gallery-strip::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.22);
+    border-radius: 999px;
+  }
+
+  .xas-thumb {
+    appearance: none;
+    position: relative;
+    flex: 0 0 auto;
+    height: 52px;
+    min-width: 40px;
+    max-width: 120px;
+    padding: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 2px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+    cursor: pointer;
+    opacity: 0.72;
+    transition: opacity 0.14s ease, border-color 0.14s ease, transform 0.12s ease;
+  }
+
+  .xas-thumb:hover {
+    opacity: 0.96;
+    border-color: rgba(255, 255, 255, 0.42);
+  }
+
+  .xas-thumb.xas-thumb-stitched {
+    min-width: 72px;
+  }
+
+  .xas-thumb.xas-thumb-active {
+    opacity: 1;
+    border-color: #1d9bf0;
+    box-shadow: 0 0 0 1px rgba(29, 155, 240, 0.55);
+  }
+
+  .xas-thumb-img {
+    display: block;
+    height: 100%;
+    width: auto;
+    max-width: 120px;
+    min-width: 40px;
+    object-fit: cover;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  .xas-thumb-tag {
+    position: absolute;
+    left: 3px;
+    bottom: 3px;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 5px;
+    border-radius: 999px;
+    background: rgba(15, 20, 25, 0.82);
+    color: #eff3f4;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    pointer-events: none;
+  }
+
+  .xas-thumb-stitched .xas-thumb-tag {
+    background: rgba(29, 155, 240, 0.9);
+    color: #ffffff;
+  }
+
+  .xas-toolbar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 30;
+    max-width: calc(100% - 16px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 12px;
+    line-height: 1;
+    pointer-events: auto;
+  }
+
+  .xas-pill {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 3px;
+    padding: 4px 6px;
+    border-radius: 999px;
+    background: rgba(15, 20, 25, 0.78);
+    color: #eff3f4;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
+    opacity: 0.78;
+    transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+  }
+
+  .xas-root:hover .xas-pill,
+  .xas-toolbar:hover .xas-pill,
+  .xas-toolbar.xas-expanded .xas-pill,
+  .xas-pill.xas-suggested {
+    opacity: 1;
+  }
+
+  .xas-pill.xas-suggested {
+    border-color: rgba(29, 155, 240, 0.75);
+    background: rgba(15, 24, 34, 0.88);
+  }
+
+  .xas-pill.xas-collapsed {
+    opacity: 0.52;
+    padding: 3px 5px;
+  }
+
+  .xas-root:hover .xas-pill.xas-collapsed {
+    opacity: 0.95;
+  }
+
+  .xas-icon {
+    display: block;
+    flex-shrink: 0;
+    fill: currentColor;
+  }
+
+  .xas-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: #eff3f4;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    height: 26px;
+    padding: 0 9px;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    white-space: nowrap;
+    transition: background 0.14s ease, color 0.14s ease;
+  }
+
+  .xas-btn.xas-btn-icon {
+    width: 26px;
+    padding: 0;
+  }
+
+  .xas-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+  }
+
+  .xas-btn:disabled {
+    opacity: 0.45;
+    cursor: wait;
+  }
+
+  .xas-btn.xas-btn-active {
+    background: #1d9bf0;
+    color: #ffffff;
+  }
+
+  .xas-btn.xas-btn-accent {
+    color: #6cc5ff;
+  }
+
+  .xas-sep {
+    width: 1px;
+    height: 14px;
+    background: rgba(255, 255, 255, 0.18);
+    margin: 0 2px;
+  }
+
+  .xas-order-bar {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    border-radius: 12px;
+    background: rgba(15, 20, 25, 0.9);
+    color: #eff3f4;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.38);
+  }
+
+  .xas-order-hint {
+    font-size: 11px;
+    color: #8b98a5;
+    margin-right: 2px;
+  }
+
+  .xas-slot-chip {
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    background: rgba(255, 255, 255, 0.08);
+    color: #eff3f4;
+    font: inherit;
+    font-weight: 700;
+    min-width: 24px;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.14s ease, border-color 0.14s ease, transform 0.1s ease;
+  }
+
+  .xas-slot-chip:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .xas-slot-chip.xas-slot-selected {
+    background: #1d9bf0;
+    border-color: #6cc5ff;
+    color: #fff;
+    transform: scale(1.06);
+  }
+
+  .xas-meta-badge {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    z-index: 25;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    background: rgba(15, 20, 25, 0.72);
+    color: #e7e9ea;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(8px);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+
+  .xas-stage:hover .xas-meta-badge,
+  .xas-root:hover .xas-meta-badge {
+    opacity: 1;
+  }
+
+  .xas-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.28);
+    border-top-color: #1d9bf0;
+    border-radius: 50%;
+    animation: xas-spin 0.75s linear infinite;
+  }
+
+  @keyframes xas-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Fullscreen Lightbox */
+  .xas-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483000;
+    background: rgba(0, 0, 0, 0.92);
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #eff3f4;
+    user-select: none;
+  }
+
+  .xas-lb-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 18px;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+    z-index: 2;
+  }
+
+  .xas-lb-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e7e9ea;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .xas-lb-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .xas-lb-btn {
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(25, 32, 40, 0.85);
+    color: #eff3f4;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .xas-lb-btn:hover {
+    background: rgba(45, 58, 72, 0.95);
+    border-color: rgba(255, 255, 255, 0.35);
+  }
+
+  .xas-lb-btn.xas-lb-primary {
+    background: #1d9bf0;
+    border-color: #1d9bf0;
+    color: #fff;
+  }
+
+  .xas-lb-btn.xas-lb-primary:hover {
+    background: #1a8cd8;
+  }
+
+  .xas-lb-viewport {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+  }
+
+  .xas-lb-viewport.xas-dragging {
+    cursor: grabbing;
+  }
+
+  .xas-lb-nav {
+    appearance: none;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 4;
+    width: 42px;
+    height: 42px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    background: rgba(20, 27, 34, 0.78);
+    color: #eff3f4;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    transition: background 0.14s ease, border-color 0.14s ease;
+  }
+
+  .xas-lb-nav:hover {
+    background: rgba(29, 155, 240, 0.88);
+    border-color: rgba(255, 255, 255, 0.45);
+  }
+
+  .xas-lb-prev {
+    left: 16px;
+  }
+
+  .xas-lb-next {
+    right: 16px;
+  }
+
+  .xas-lb-img {
+    max-width: none;
+    max-height: none;
+    transform-origin: center center;
+    will-change: transform;
+    -webkit-user-drag: none;
+    user-select: none;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);
+  }
+
+  .xas-lb-footer {
+    padding: 8px 16px;
+    text-align: center;
+    font-size: 11px;
+    color: #8b98a5;
+    pointer-events: none;
+  }
+
+  /* Settings Modal */
+  .xas-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483100;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  .xas-modal {
+    width: 100%;
+    max-width: 440px;
+    background: #15202b;
+    color: #eff3f4;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+  }
+
+  .xas-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .xas-modal-head h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 700;
+  }
+
+  .xas-modal-body {
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .xas-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13px;
+  }
+
+  .xas-field-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+  }
+
+  .xas-field-desc {
+    font-size: 11px;
+    color: #8b98a5;
+    margin-top: 2px;
+  }
+
+  .xas-select,
+  .xas-input {
+    background: #1e2d3d;
+    color: #eff3f4;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .xas-checkbox {
+    width: 18px;
+    height: 18px;
+    accent-color: #1d9bf0;
+    cursor: pointer;
+  }
+
+  .xas-modal-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 18px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  /* Toast */
+  .xas-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 26px;
+    transform: translateX(-50%) translateY(12px);
+    z-index: 2147483200;
+    padding: 10px 16px;
+    border-radius: 999px;
+    background: rgba(15, 20, 25, 0.94);
+    color: #eff3f4;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+  }
+
+  .xas-toast.xas-toast-visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  .xas-toast.xas-toast-error {
+    border-color: rgba(244, 33, 46, 0.7);
+    color: #ff9aa2;
+  }
+  `;
 
   // Install passive GraphQL/XHR hooks immediately at document-start before X boots.
   installGraphqlInterceptor();

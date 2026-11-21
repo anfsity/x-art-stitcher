@@ -6,6 +6,9 @@ const IS_ZH = typeof navigator !== 'undefined' && /^zh/i.test(navigator.language
 const TEXT = {
   stitch: IS_ZH ? '拼图' : 'Stitch',
   suggested: IS_ZH ? '检测到拼图' : 'Split Detected',
+  partialSuggested: IS_ZH ? '局部拼图' : 'Partial Split',
+  multiGroupSuffix: IS_ZH ? '组拼图' : 'Split Groups',
+  singleSlide: IS_ZH ? '单图' : 'Single',
   original: IS_ZH ? '原图' : 'Orig',
   auto: IS_ZH ? '自动' : 'Auto',
   unshuffledBadge: IS_ZH ? '已自动复原顺序' : 'Auto Unshuffled',
@@ -14,9 +17,11 @@ const TEXT = {
   autoOrder: IS_ZH ? '自动排序' : 'Auto',
   resetOrder: IS_ZH ? '默认' : 'Reset',
   zoomTitle: IS_ZH ? '全屏放大预览' : 'Fullscreen preview',
-  downloadTitle: IS_ZH ? '下载拼合原图' : 'Download stitched image',
-  copyTitle: IS_ZH ? '复制拼合图到剪贴板' : 'Copy image to clipboard',
+  downloadTitle: IS_ZH ? '下载当前原图' : 'Download current image',
+  copyTitle: IS_ZH ? '复制当前图片到剪贴板' : 'Copy current image to clipboard',
   settingsTitle: IS_ZH ? '设置' : 'Settings',
+  prevItemTitle: IS_ZH ? '上一项' : 'Previous item',
+  nextItemTitle: IS_ZH ? '下一项' : 'Next item',
   loading: IS_ZH ? '拼合中...' : 'Stitching...',
   lbFit: IS_ZH ? '适应窗口' : 'Fit',
   lbActual: '1:1',
@@ -26,6 +31,9 @@ const TEXT = {
   lbFooter: IS_ZH
     ? '滚轮缩放 · 拖拽平移 · 单击切换适应/原尺寸 · 快捷键: D 下载 / C 复制 / 0 适应 / ESC 关闭'
     : 'Wheel to zoom · Drag to pan · Click toggles Fit/1:1 · Keys: D download / C copy / 0 fit / ESC close',
+  lbFooterMulti: IS_ZH
+    ? '滚轮缩放 · 拖拽平移 · ←/→ 切换画廊 · 单击适应/1:1 · D 下载 / C 复制 / ESC 关闭'
+    : 'Wheel zoom · Drag pan · ←/→ switch item · Click Fit/1:1 · D download / C copy / ESC close',
   settingsHeading: IS_ZH ? 'X Art Stitcher 设置' : 'X Art Stitcher Settings',
   optAutoDetect: IS_ZH ? '自动识别多图拼图' : 'Auto-detect split artworks',
   optAutoDetectDesc: IS_ZH
@@ -78,6 +86,22 @@ export function getLayoutLabel(layout) {
   }
 }
 
+export function formatIndexRange(indices) {
+  if (!indices || indices.length === 0) return '';
+  const sorted = indices.slice().sort((a, b) => a - b);
+  let contiguous = true;
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] !== sorted[i - 1] + 1) {
+      contiguous = false;
+      break;
+    }
+  }
+  if (contiguous && sorted.length > 1) {
+    return `${sorted[0] + 1}–${sorted[sorted.length - 1] + 1}`;
+  }
+  return sorted.map((i) => i + 1).join(',');
+}
+
 let toastTimer = null;
 let toastEl = null;
 
@@ -125,9 +149,20 @@ function makeIconButton({ icon, title, size = 16, active = false, onClick }) {
   return btn;
 }
 
-export function openLightbox({ url, title, width, height, onDownload, onCopy }) {
+export function openLightbox({
+  items,
+  activeIndex = 0,
+  onSelectIndex,
+  onDownload,
+  onCopy,
+}) {
+  if (!Array.isArray(items) || items.length === 0) return;
   const existing = document.querySelector('.xas-lightbox');
   if (existing) existing.remove();
+
+  const slideList = items.map((item) => ({ ...item, width: item.width || 0, height: item.height || 0 }));
+  let currentIdx = Math.max(0, Math.min(slideList.length - 1, activeIndex));
+  const isMulti = slideList.length > 1;
 
   const overlay = document.createElement('div');
   overlay.className = 'xas-lightbox';
@@ -137,7 +172,6 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
 
   const titleEl = document.createElement('div');
   titleEl.className = 'xas-lb-title';
-  titleEl.textContent = `${title} · ${width}×${height}`;
 
   const actions = document.createElement('div');
   actions.className = 'xas-lb-actions';
@@ -159,14 +193,43 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
 
   const img = document.createElement('img');
   img.className = 'xas-lb-img';
-  img.src = url;
-  img.alt = title;
   viewport.appendChild(img);
+
+  let prevBtn = null;
+  let nextBtn = null;
+  if (isMulti) {
+    prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'xas-lb-nav xas-lb-prev';
+    prevBtn.title = t('prevItemTitle');
+    prevBtn.setAttribute('aria-label', t('prevItemTitle'));
+    prevBtn.appendChild(createIcon('chevron_left', 24));
+    prevBtn.addEventListener('click', (e) => {
+      stopBubble(e);
+      stepSlide(-1);
+    });
+
+    nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'xas-lb-nav xas-lb-next';
+    nextBtn.title = t('nextItemTitle');
+    nextBtn.setAttribute('aria-label', t('nextItemTitle'));
+    nextBtn.appendChild(createIcon('chevron_right', 24));
+    nextBtn.addEventListener('click', (e) => {
+      stopBubble(e);
+      stepSlide(1);
+    });
+
+    viewport.appendChild(prevBtn);
+    viewport.appendChild(nextBtn);
+  }
 
   const footer = document.createElement('div');
   footer.className = 'xas-lb-footer';
-  footer.textContent = t('lbFooter');
+  footer.textContent = isMulti ? t('lbFooterMulti') : t('lbFooter');
 
+  let curW = 1;
+  let curH = 1;
   let scale = 1;
   let fitScale = 1;
   let tx = 0;
@@ -187,7 +250,9 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
     const pad = 24;
     const availW = Math.max(100, rect.width - pad * 2);
     const availH = Math.max(100, rect.height - pad * 2);
-    return Math.min(1, availW / Math.max(1, width), availH / Math.max(1, height));
+    const w = Math.max(1, curW || img.naturalWidth || 1);
+    const h = Math.max(1, curH || img.naturalHeight || 1);
+    return Math.min(1, availW / w, availH / h);
   };
 
   const setFit = () => {
@@ -204,6 +269,49 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
     tx = 0;
     ty = 0;
     applyTransform();
+  };
+
+  const updateTitle = () => {
+    const item = slideList[currentIdx];
+    const parts = [item.title];
+    if (curW > 0 && curH > 0) parts.push(`${curW}×${curH}`);
+    if (isMulti) parts.push(`${currentIdx + 1} / ${slideList.length}`);
+    titleEl.textContent = parts.join(' · ');
+  };
+
+  const loadSlide = (idx) => {
+    currentIdx = idx;
+    const item = slideList[currentIdx];
+    curW = item.width || 0;
+    curH = item.height || 0;
+    img.src = item.url;
+    img.alt = item.title;
+    updateTitle();
+    if (prevBtn) prevBtn.style.display = currentIdx > 0 ? 'inline-flex' : 'none';
+    if (nextBtn) nextBtn.style.display = currentIdx + 1 < slideList.length ? 'inline-flex' : 'none';
+    if (curW > 0 && curH > 0) {
+      requestAnimationFrame(setFit);
+    }
+  };
+
+  img.addEventListener('load', () => {
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      if (!curW || !curH) {
+        curW = img.naturalWidth;
+        curH = img.naturalHeight;
+        slideList[currentIdx].width = curW;
+        slideList[currentIdx].height = curH;
+        updateTitle();
+      }
+      setFit();
+    }
+  });
+
+  const stepSlide = (delta) => {
+    const nextIdx = currentIdx + delta;
+    if (nextIdx < 0 || nextIdx >= slideList.length) return;
+    loadSlide(nextIdx);
+    onSelectIndex?.(nextIdx);
   };
 
   const close = () => {
@@ -227,6 +335,12 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
     if (e.key === 'Escape') {
       stopBubble(e);
       close();
+    } else if (isMulti && e.key === 'ArrowLeft') {
+      stopBubble(e);
+      stepSlide(-1);
+    } else if (isMulti && e.key === 'ArrowRight') {
+      stopBubble(e);
+      stepSlide(1);
     } else if (e.key === '0') {
       stopBubble(e);
       setFit();
@@ -243,10 +357,10 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
       applyTransform();
     } else if (e.key.toLowerCase() === 'd') {
       stopBubble(e);
-      onDownload();
+      onDownload(currentIdx);
     } else if (e.key.toLowerCase() === 'c') {
       stopBubble(e);
-      onCopy();
+      onCopy(currentIdx);
     }
   };
 
@@ -262,7 +376,7 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
   );
 
   viewport.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || e.target.closest('.xas-lb-nav')) return;
     isDragging = true;
     dragMoved = false;
     startX = e.clientX;
@@ -307,8 +421,8 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
 
   actions.appendChild(makeBtn(t('lbFit'), false, setFit, 'fit_screen'));
   actions.appendChild(makeBtn(t('lbActual'), false, setActual));
-  actions.appendChild(makeBtn(t('lbCopy'), false, onCopy, 'content_copy'));
-  actions.appendChild(makeBtn(t('lbDownload'), true, onDownload, 'download'));
+  actions.appendChild(makeBtn(t('lbCopy'), false, () => onCopy(currentIdx), 'content_copy'));
+  actions.appendChild(makeBtn(t('lbDownload'), true, () => onDownload(currentIdx), 'download'));
   actions.appendChild(makeBtn(t('lbClose'), false, close, 'close'));
 
   header.appendChild(titleEl);
@@ -321,7 +435,7 @@ export function openLightbox({ url, title, width, height, onDownload, onCopy }) 
   window.addEventListener('keydown', onKeyDown, true);
   window.addEventListener('resize', onResize);
 
-  requestAnimationFrame(setFit);
+  loadSlide(currentIdx);
 }
 
 export function openSettingsModal(currentConfig, onSave) {
@@ -467,7 +581,8 @@ export function openSettingsModal(currentConfig, onSave) {
 }
 
 /**
- * Manage the injected UI controls and stitched preview stage for a single tweet gallery.
+ * Manage the injected UI controls and stitched / mixed-gallery preview stage
+ * for a single tweet gallery.
  */
 export function createGalleryUI(gallery, callbacks) {
   const { container, urls } = gallery;
@@ -481,6 +596,9 @@ export function createGalleryUI(gallery, callbacks) {
   stage.className = 'xas-injected xas-stage';
   stage.style.display = 'none';
 
+  const stageMedia = document.createElement('div');
+  stageMedia.className = 'xas-stage-media';
+
   const previewImg = document.createElement('img');
   previewImg.className = 'xas-preview';
   previewImg.addEventListener('click', (e) => {
@@ -488,34 +606,179 @@ export function createGalleryUI(gallery, callbacks) {
     callbacks.onOpenLightbox();
   });
 
+  const prevNavBtn = document.createElement('button');
+  prevNavBtn.type = 'button';
+  prevNavBtn.className = 'xas-nav-btn xas-nav-prev';
+  prevNavBtn.title = t('prevItemTitle');
+  prevNavBtn.setAttribute('aria-label', t('prevItemTitle'));
+  prevNavBtn.style.display = 'none';
+  prevNavBtn.appendChild(createIcon('chevron_left', 22));
+  prevNavBtn.addEventListener('click', (e) => {
+    stopBubble(e);
+    if (state.activeIndex > 0) {
+      callbacks.onSelectGalleryItem?.(state.activeIndex - 1);
+    }
+  });
+
+  const nextNavBtn = document.createElement('button');
+  nextNavBtn.type = 'button';
+  nextNavBtn.className = 'xas-nav-btn xas-nav-next';
+  nextNavBtn.title = t('nextItemTitle');
+  nextNavBtn.setAttribute('aria-label', t('nextItemTitle'));
+  nextNavBtn.style.display = 'none';
+  nextNavBtn.appendChild(createIcon('chevron_right', 22));
+  nextNavBtn.addEventListener('click', (e) => {
+    stopBubble(e);
+    if (state.activeIndex + 1 < state.items.length) {
+      callbacks.onSelectGalleryItem?.(state.activeIndex + 1);
+    }
+  });
+
   const metaBadge = document.createElement('div');
   metaBadge.className = 'xas-meta-badge';
 
-  stage.appendChild(previewImg);
-  stage.appendChild(metaBadge);
+  stageMedia.appendChild(previewImg);
+  stageMedia.appendChild(prevNavBtn);
+  stageMedia.appendChild(nextNavBtn);
+  stageMedia.appendChild(metaBadge);
+
+  const filmstrip = document.createElement('div');
+  filmstrip.className = 'xas-gallery-strip';
+  filmstrip.style.display = 'none';
+  filmstrip.addEventListener('click', stopBubble);
+  filmstrip.addEventListener(
+    'wheel',
+    (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && filmstrip.scrollWidth > filmstrip.clientWidth) {
+        e.preventDefault();
+        filmstrip.scrollLeft += e.deltaY;
+      }
+    },
+    { passive: false },
+  );
+
+  stage.appendChild(stageMedia);
+  stage.appendChild(filmstrip);
 
   container.appendChild(stage);
   container.appendChild(toolbar);
 
   const state = {
-    stitched: false,
+    active: false,
     busy: false,
     expanded: false,
     showOrderEditor: false,
     selectedSlot: null,
-    activeLayout: null,
-    order: Array.from({ length: urls.length }, (_, i) => i),
-    suggested: null, // { layout, order, wasUnshuffled }
-    wasUnshuffled: false,
-    width: 0,
-    height: 0,
+    items: [], // [{ type: 'stitched', ... } | { type: 'single', ... }]
+    activeIndex: 0,
+    suggested: null, // full or partial suggestion
   };
 
-  const layouts = getAvailableLayouts(urls.length);
+  const fullLayouts = getAvailableLayouts(urls.length);
+
+  const getActiveItem = () => (state.active ? state.items[state.activeIndex] || null : null);
+
+  const formatSuggestionLabel = (s) => {
+    if (s.isPartial) {
+      if (s.stitchedCount > 1) {
+        return `${s.stitchedCount} ${t('multiGroupSuffix')}`;
+      }
+      const range = formatIndexRange(s.primaryGroup.indices);
+      return `${t('partialSuggested')} #${range} (${getLayoutLabel(s.primaryGroup.layout)})`;
+    }
+    return `${t('suggested')} (${getLayoutLabel(s.layout)})`;
+  };
+
+  const updateStageView = () => {
+    const item = getActiveItem();
+    if (!item) return;
+
+    const isMulti = state.items.length > 1;
+    previewImg.src = item.type === 'stitched' ? item.objectUrl : item.url;
+
+    prevNavBtn.style.display = isMulti && state.activeIndex > 0 ? 'inline-flex' : 'none';
+    nextNavBtn.style.display = isMulti && state.activeIndex + 1 < state.items.length ? 'inline-flex' : 'none';
+
+    metaBadge.textContent = '';
+    const parts = [];
+    if (item.type === 'stitched') {
+      if (item.wasUnshuffled) {
+        metaBadge.appendChild(createIcon('auto_awesome', 14));
+        parts.push(t('unshuffledBadge'));
+      }
+      if (isMulti) parts.push(`#${formatIndexRange(item.indices)}`);
+      parts.push(getLayoutLabel(item.layout));
+      if (item.width > 0 && item.height > 0) parts.push(`${item.width}×${item.height}`);
+    } else {
+      parts.push(`#${item.index + 1}`);
+      parts.push(t('singleSlide'));
+      if (item.width > 0 && item.height > 0) parts.push(`${item.width}×${item.height}`);
+    }
+    if (isMulti) {
+      parts.push(`${state.activeIndex + 1} / ${state.items.length}`);
+    }
+    const metaText = document.createElement('span');
+    metaText.textContent = parts.join(' · ');
+    metaBadge.appendChild(metaText);
+
+    if (!isMulti) {
+      filmstrip.style.display = 'none';
+      filmstrip.textContent = '';
+      return;
+    }
+
+    filmstrip.style.display = 'flex';
+    filmstrip.textContent = '';
+    state.items.forEach((entry, idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isSelected = idx === state.activeIndex;
+      btn.className =
+        'xas-thumb' +
+        (entry.type === 'stitched' ? ' xas-thumb-stitched' : '') +
+        (isSelected ? ' xas-thumb-active' : '');
+      const label =
+        entry.type === 'stitched'
+          ? `${t('stitch')} #${formatIndexRange(entry.indices)} (${getLayoutLabel(entry.layout)})`
+          : `#${entry.index + 1}`;
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+
+      const thumbImg = document.createElement('img');
+      thumbImg.className = 'xas-thumb-img';
+      thumbImg.src = entry.type === 'stitched' ? entry.objectUrl : entry.thumbUrl;
+      thumbImg.alt = label;
+      btn.appendChild(thumbImg);
+
+      const tag = document.createElement('span');
+      tag.className = 'xas-thumb-tag';
+      if (entry.type === 'stitched') {
+        tag.appendChild(createIcon('grid_view', 11));
+        const tagText = document.createElement('span');
+        tagText.textContent = formatIndexRange(entry.indices);
+        tag.appendChild(tagText);
+      } else {
+        tag.textContent = String(entry.index + 1);
+      }
+      btn.appendChild(tag);
+
+      btn.addEventListener('click', (e) => {
+        stopBubble(e);
+        if (idx !== state.activeIndex) {
+          callbacks.onSelectGalleryItem?.(idx);
+        }
+      });
+
+      filmstrip.appendChild(btn);
+      if (isSelected) {
+        btn.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      }
+    });
+  };
 
   const renderToolbar = () => {
     toolbar.textContent = '';
-    toolbar.classList.toggle('xas-expanded', state.expanded || state.stitched);
+    toolbar.classList.toggle('xas-expanded', state.expanded || state.active);
 
     const pill = document.createElement('div');
     pill.className = 'xas-pill';
@@ -532,25 +795,28 @@ export function createGalleryUI(gallery, callbacks) {
       return;
     }
 
-    if (!state.stitched && !state.expanded) {
+    if (!state.active && !state.expanded) {
       pill.classList.add(state.suggested ? 'xas-suggested' : 'xas-collapsed');
       const trigger = document.createElement('button');
       trigger.type = 'button';
       trigger.className = state.suggested ? 'xas-btn xas-btn-accent' : 'xas-btn';
       if (state.suggested) {
-        appendIconLabel(
-          trigger,
-          'auto_awesome',
-          `${t('suggested')} (${getLayoutLabel(state.suggested.layout)})`,
-          15,
-        );
+        appendIconLabel(trigger, 'auto_awesome', formatSuggestionLabel(state.suggested), 15);
       } else {
         appendIconLabel(trigger, 'grid_view', t('stitch'), 15);
       }
       trigger.addEventListener('click', (e) => {
         stopBubble(e);
         if (state.suggested) {
-          callbacks.onSelectLayout(state.suggested.layout, state.suggested.order, state.suggested.wasUnshuffled);
+          if (state.suggested.isPartial) {
+            callbacks.onOpenMixedGallery?.(state.suggested.groups);
+          } else {
+            callbacks.onSelectLayout(
+              state.suggested.layout,
+              state.suggested.order,
+              state.suggested.wasUnshuffled,
+            );
+          }
         } else {
           state.expanded = true;
           renderToolbar();
@@ -561,17 +827,20 @@ export function createGalleryUI(gallery, callbacks) {
       return;
     }
 
-    // Restore original view button (or collapse if not stitched)
+    const activeItem = getActiveItem();
+    const isStitchedItem = Boolean(activeItem && activeItem.type === 'stitched');
+
+    // Restore original view button (or collapse if not active)
     const origBtn = document.createElement('button');
     origBtn.type = 'button';
-    origBtn.className = state.stitched ? 'xas-btn' : 'xas-btn xas-btn-active';
+    origBtn.className = state.active ? 'xas-btn' : 'xas-btn xas-btn-active';
     origBtn.textContent = t('original');
     origBtn.addEventListener('click', (e) => {
       stopBubble(e);
       state.expanded = false;
       state.showOrderEditor = false;
       state.selectedSlot = null;
-      if (state.stitched) {
+      if (state.active) {
         callbacks.onRestoreOriginal();
       } else {
         renderToolbar();
@@ -579,21 +848,19 @@ export function createGalleryUI(gallery, callbacks) {
     });
     pill.appendChild(origBtn);
 
-    // Layout selector buttons
-    for (const layout of layouts) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className =
-        state.stitched && state.activeLayout === layout ? 'xas-btn xas-btn-active' : 'xas-btn';
-      btn.textContent = getLayoutLabel(layout);
-      btn.addEventListener('click', (e) => {
-        stopBubble(e);
-        callbacks.onSelectLayout(layout, null, false);
-      });
-      pill.appendChild(btn);
-    }
+    if (!state.active) {
+      for (const layout of fullLayouts) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'xas-btn';
+        btn.textContent = getLayoutLabel(layout);
+        btn.addEventListener('click', (e) => {
+          stopBubble(e);
+          callbacks.onSelectLayout(layout, null, false);
+        });
+        pill.appendChild(btn);
+      }
 
-    if (!state.stitched) {
       const autoBtn = document.createElement('button');
       autoBtn.type = 'button';
       autoBtn.className = 'xas-btn xas-btn-accent';
@@ -604,22 +871,40 @@ export function createGalleryUI(gallery, callbacks) {
       });
       pill.appendChild(autoBtn);
     } else {
+      if (isStitchedItem) {
+        const groupLayouts = getAvailableLayouts(activeItem.indices.length);
+        for (const layout of groupLayouts) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = activeItem.layout === layout ? 'xas-btn xas-btn-active' : 'xas-btn';
+          btn.textContent = getLayoutLabel(layout);
+          btn.addEventListener('click', (e) => {
+            stopBubble(e);
+            callbacks.onSelectLayout(layout, null, false);
+          });
+          pill.appendChild(btn);
+        }
+      }
+
       const sep = document.createElement('span');
       sep.className = 'xas-sep';
       pill.appendChild(sep);
 
-      pill.appendChild(
-        makeIconButton({
-          icon: 'swap_horiz',
-          title: t('orderBtnTitle'),
-          active: state.showOrderEditor,
-          onClick: () => {
-            state.showOrderEditor = !state.showOrderEditor;
-            state.selectedSlot = null;
-            renderToolbar();
-          },
-        }),
-      );
+      if (isStitchedItem) {
+        pill.appendChild(
+          makeIconButton({
+            icon: 'swap_horiz',
+            title: t('orderBtnTitle'),
+            active: state.showOrderEditor,
+            onClick: () => {
+              state.showOrderEditor = !state.showOrderEditor;
+              state.selectedSlot = null;
+              renderToolbar();
+            },
+          }),
+        );
+      }
+
       pill.appendChild(
         makeIconButton({
           icon: 'zoom_in',
@@ -653,8 +938,8 @@ export function createGalleryUI(gallery, callbacks) {
 
     toolbar.appendChild(pill);
 
-    // Optional inline tile-order swapper bar
-    if (state.stitched && state.showOrderEditor) {
+    // Optional inline tile-order swapper bar for the active stitched item
+    if (isStitchedItem && state.showOrderEditor) {
       const orderBar = document.createElement('div');
       orderBar.className = 'xas-order-bar';
 
@@ -663,12 +948,13 @@ export function createGalleryUI(gallery, callbacks) {
       hint.textContent = t('orderHint');
       orderBar.appendChild(hint);
 
-      state.order.forEach((origIdx, slotPos) => {
+      activeItem.order.forEach((localIdx, slotPos) => {
+        const origTweetIdx = activeItem.indices[localIdx];
         const chip = document.createElement('button');
         chip.type = 'button';
         chip.className =
           state.selectedSlot === slotPos ? 'xas-slot-chip xas-slot-selected' : 'xas-slot-chip';
-        chip.textContent = String(origIdx + 1);
+        chip.textContent = String(origTweetIdx + 1);
         chip.addEventListener('click', (e) => {
           stopBubble(e);
           if (state.selectedSlot === null) {
@@ -681,7 +967,7 @@ export function createGalleryUI(gallery, callbacks) {
             renderToolbar();
             return;
           }
-          const nextOrder = state.order.slice();
+          const nextOrder = activeItem.order.slice();
           const a = state.selectedSlot;
           [nextOrder[a], nextOrder[slotPos]] = [nextOrder[slotPos], nextOrder[a]];
           state.selectedSlot = null;
@@ -696,7 +982,7 @@ export function createGalleryUI(gallery, callbacks) {
       appendIconLabel(autoOrderBtn, 'auto_awesome', t('autoOrder'), 14);
       autoOrderBtn.addEventListener('click', (e) => {
         stopBubble(e);
-        callbacks.onAutoSolve(state.activeLayout);
+        callbacks.onAutoSolve(activeItem.layout);
       });
       orderBar.appendChild(autoOrderBtn);
 
@@ -706,7 +992,7 @@ export function createGalleryUI(gallery, callbacks) {
       appendIconLabel(resetOrderBtn, 'restart_alt', t('resetOrder'), 14);
       resetOrderBtn.addEventListener('click', (e) => {
         stopBubble(e);
-        callbacks.onChangeOrder(Array.from({ length: urls.length }, (_, i) => i));
+        callbacks.onChangeOrder(Array.from({ length: activeItem.indices.length }, (_, i) => i));
       });
       orderBar.appendChild(resetOrderBtn);
 
@@ -715,6 +1001,23 @@ export function createGalleryUI(gallery, callbacks) {
   };
 
   renderToolbar();
+
+  const showGallery = ({ items, activeIndex = 0 }) => {
+    state.active = true;
+    state.busy = false;
+    state.items = items;
+    state.activeIndex = Math.max(0, Math.min(items.length - 1, activeIndex));
+    const current = getActiveItem();
+    if (!current || current.type !== 'stitched') {
+      state.showOrderEditor = false;
+      state.selectedSlot = null;
+    }
+
+    updateStageView();
+    stage.style.display = 'flex';
+    container.classList.add('xas-active');
+    renderToolbar();
+  };
 
   return {
     setBusy(isBusy) {
@@ -725,35 +1028,14 @@ export function createGalleryUI(gallery, callbacks) {
       state.suggested = suggestion;
       renderToolbar();
     },
-    showStitched({ objectUrl, layout, order, width, height, wasUnshuffled }) {
-      state.stitched = true;
-      state.busy = false;
-      state.activeLayout = layout;
-      state.order = order.slice();
-      state.width = width;
-      state.height = height;
-      state.wasUnshuffled = Boolean(wasUnshuffled);
-
-      previewImg.src = objectUrl;
-      metaBadge.textContent = '';
-      const parts = [getLayoutLabel(layout), `${width}×${height}`];
-      if (state.wasUnshuffled) {
-        metaBadge.appendChild(createIcon('auto_awesome', 14));
-        parts.unshift(t('unshuffledBadge'));
-      }
-      const metaText = document.createElement('span');
-      metaText.textContent = parts.join(' · ');
-      metaBadge.appendChild(metaText);
-
-      stage.style.display = 'flex';
-      container.classList.add('xas-active');
-      renderToolbar();
-    },
+    showGallery,
     showOriginal() {
-      state.stitched = false;
+      state.active = false;
       state.busy = false;
       state.showOrderEditor = false;
       state.selectedSlot = null;
+      state.items = [];
+      state.activeIndex = 0;
       stage.style.display = 'none';
       container.classList.remove('xas-active');
       renderToolbar();

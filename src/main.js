@@ -12,8 +12,15 @@ import {
 } from './gm.js';
 import { installGraphqlInterceptor, onTweetMediaCaptured } from './interceptor.js';
 import { canvasToBlob, getAvailableLayouts, renderStitchedCanvas } from './stitcher.js';
-import { createGalleryUI, getLayoutLabel, openLightbox, openSettingsModal, showToast } from './ui.js';
-import { formatFilename, getMediaVariantUrls } from './url.js';
+import {
+  createGalleryUI,
+  formatIndexRange,
+  getLayoutLabel,
+  openLightbox,
+  openSettingsModal,
+  showToast,
+} from './ui.js';
+import { buildMediaUrl, formatFilename, getMediaVariantUrls } from './url.js';
 
 // Replaced at build time with contents of src/styles.css.
 const STYLES_CSS = '__XAS_STYLES_CSS__';
@@ -116,33 +123,29 @@ function debugLog(...args) {
   }
 }
 
+async function fetchCachedOrigBlob(src) {
+  const variants = getMediaVariantUrls(src, 'orig');
+  const cacheKey = variants[0];
+  let blob = origBlobCache.get(cacheKey);
+  if (!blob) {
+    blob = await fetchBlobWithFallback(variants);
+    origBlobCache.set(cacheKey, blob);
+  }
+  return blob;
+}
+
 async function fetchCachedOrigDecoded(urls) {
-  const blobs = await mapConcurrent(urls, 6, async (src) => {
-    const variants = getMediaVariantUrls(src, 'orig');
-    const cacheKey = variants[0];
-    let blob = origBlobCache.get(cacheKey);
-    if (!blob) {
-      blob = await fetchBlobWithFallback(variants);
-      origBlobCache.set(cacheKey, blob);
-    }
-    return blob;
-  });
+  const blobs = await mapConcurrent(urls, 6, fetchCachedOrigBlob);
   return Promise.all(blobs.map(decodeImage));
 }
 
-async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle = config.autoUnshuffle } = {}) {
-  const cacheKey = `${gallery.signature}|${config.sensitivity}|${allowUnshuffle ? 1 : 0}`;
-  if (!forceRecompute) {
-    const cached = analysisCache.get(cacheKey);
-    if (cached) return cached;
-  }
-
-  const rgbaList = await mapConcurrent(gallery.urls, 6, async (src, idx) => {
+async function fetchThumbRgba(urls, origDims) {
+  return mapConcurrent(urls, 6, async (src, idx) => {
     const blob = await fetchBlobWithFallback(getMediaVariantUrls(src, 'thumb'));
     const decoded = await decodeImage(blob);
     try {
       const rgba = extractRgbaFromDecoded(decoded, 480);
-      const knownDim = gallery.origDims?.[idx];
+      const knownDim = origDims?.[idx];
       if (knownDim?.width > 0 && knownDim?.height > 0) {
         rgba.origWidth = knownDim.width;
         rgba.origHeight = knownDim.height;
@@ -152,7 +155,16 @@ async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle 
       decoded.close();
     }
   });
+}
 
+async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle = config.autoUnshuffle } = {}) {
+  const cacheKey = `${gallery.signature}|${config.sensitivity}|${allowUnshuffle ? 1 : 0}`;
+  if (!forceRecompute) {
+    const cached = analysisCache.get(cacheKey);
+    if (cached) return cached;
+  }
+
+  const rgbaList = await fetchThumbRgba(gallery.urls, gallery.origDims);
   const thresholds = getThresholds(config.sensitivity);
   const result = detectSplitArtwork(rgbaList, {
     ...thresholds,
@@ -164,7 +176,11 @@ async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle 
     tweetId: gallery.tweetId,
     count: gallery.urls.length,
     isMatch: result.isMatch,
+    isPartial: result.isPartial,
     wasUnshuffled: result.wasUnshuffled,
+    groups: result.groups?.map((g) =>
+      g.type === 'stitched' ? { type: 'stitched', indices: g.indices, layout: g.layout } : g,
+    ),
     winner: result.winner
       ? {
           layout: result.winner.layout,
@@ -181,78 +197,127 @@ async function analyzeGallery(gallery, { forceRecompute = false, allowUnshuffle 
   return result;
 }
 
+function refreshRevokedEntry(item) {
+  if (item?.type !== 'stitched' || !item.entry?.revoked || !item.pngBlob) return;
+  const freshUrl = URL.createObjectURL(item.pngBlob);
+  const freshEntry = {
+    objectUrl: freshUrl,
+    pngBlob: item.pngBlob,
+    width: item.width,
+    height: item.height,
+    revoked: false,
+  };
+  item.entry = freshEntry;
+  item.objectUrl = freshUrl;
+  if (item.previewKey) {
+    previewUrlCache.set(item.previewKey, freshEntry);
+  }
+}
+
 function createGalleryController(gallery) {
   let analysis = null;
-  let currentRender = null;
+  let galleryItems = null; // Array of rendered stitched/single items when active
+  let activeIndex = 0;
   let renderSeq = 0;
 
-  const ensureCurrentCanvas = async () => {
-    if (!currentRender) throw new Error('No stitched image is currently active');
-    const decoded = await fetchCachedOrigDecoded(gallery.urls);
+  const getActiveItem = (idx = activeIndex) => (galleryItems ? galleryItems[idx] || null : null);
+
+  const buildStitchedItem = async (indices, layout, order, wasUnshuffled) => {
+    const previewKey = `${gallery.signature}|${indices.join(',')}|${layout}|${order.join(',')}`;
+    const cached = previewUrlCache.get(previewKey);
+    if (cached && !cached.revoked) {
+      return {
+        type: 'stitched',
+        indices: indices.slice(),
+        layout,
+        order: order.slice(),
+        wasUnshuffled: Boolean(wasUnshuffled),
+        entry: cached,
+        previewKey,
+        objectUrl: cached.objectUrl,
+        pngBlob: cached.pngBlob,
+        width: cached.width,
+        height: cached.height,
+      };
+    }
+
+    const subsetUrls = indices.map((idx) => gallery.urls[idx]);
+    const decoded = await fetchCachedOrigDecoded(subsetUrls);
+    let canvas;
+    let width;
+    let height;
     try {
-      return renderStitchedCanvas(decoded, currentRender.layout, currentRender.order);
+      ({ canvas, width, height } = renderStitchedCanvas(decoded, layout, order));
+    } finally {
+      decoded.forEach((d) => d.close());
+    }
+
+    const pngBlob = await canvasToBlob(canvas, 'png');
+    const objectUrl = URL.createObjectURL(pngBlob);
+    const entry = { objectUrl, pngBlob, width, height, revoked: false };
+    previewUrlCache.set(previewKey, entry);
+
+    return {
+      type: 'stitched',
+      indices: indices.slice(),
+      layout,
+      order: order.slice(),
+      wasUnshuffled: Boolean(wasUnshuffled),
+      entry,
+      previewKey,
+      objectUrl,
+      pngBlob,
+      width,
+      height,
+    };
+  };
+
+  const buildSingleItem = (index) => {
+    const src = gallery.urls[index];
+    const dim = gallery.origDims?.[index];
+    return {
+      type: 'single',
+      index,
+      url: buildMediaUrl(src, 'large'),
+      thumbUrl: buildMediaUrl(src, 'small'),
+      width: dim?.width || 0,
+      height: dim?.height || 0,
+    };
+  };
+
+  const renderCanvasForStitchedItem = async (item) => {
+    const subsetUrls = item.indices.map((idx) => gallery.urls[idx]);
+    const decoded = await fetchCachedOrigDecoded(subsetUrls);
+    try {
+      return renderStitchedCanvas(decoded, item.layout, item.order);
     } finally {
       decoded.forEach((d) => d.close());
     }
   };
 
-  const renderStitched = async (layout, customOrder = null, wasUnshuffled = false) => {
+  const renderSingleGroupView = async (layout, customOrder = null, wasUnshuffled = false) => {
     const seq = ++renderSeq;
+    const allIndices = Array.from({ length: gallery.urls.length }, (_, i) => i);
     const order =
       customOrder ||
-      (analysis?.bestByLayout?.[layout] && config.autoUnshuffle && analysis.isMatch && analysis.winner?.layout === layout
+      (!analysis?.isPartial &&
+      analysis?.bestByLayout?.[layout] &&
+      config.autoUnshuffle &&
+      analysis.isMatch &&
+      analysis.winner?.layout === layout
         ? analysis.winner.order
-        : Array.from({ length: gallery.urls.length }, (_, i) => i));
+        : allIndices);
 
-    const previewKey = `${gallery.signature}|${layout}|${order.join(',')}`;
-    const cachedPreview = previewUrlCache.get(previewKey);
-    if (cachedPreview && !cachedPreview.revoked) {
-      currentRender = {
-        entry: cachedPreview,
-        previewKey,
-        objectUrl: cachedPreview.objectUrl,
-        pngBlob: cachedPreview.pngBlob,
-        width: cachedPreview.width,
-        height: cachedPreview.height,
-        layout,
-        order: order.slice(),
-        wasUnshuffled,
-      };
-      ui.showStitched(currentRender);
-      return;
-    }
+    const previewKey = `${gallery.signature}|${allIndices.join(',')}|${layout}|${order.join(',')}`;
+    const cached = previewUrlCache.get(previewKey);
+    if (!cached || cached.revoked) ui.setBusy(true);
 
-    ui.setBusy(true);
     try {
-      const decoded = await fetchCachedOrigDecoded(gallery.urls);
-      let canvas;
-      let width;
-      let height;
-      try {
-        ({ canvas, width, height } = renderStitchedCanvas(decoded, layout, order));
-      } finally {
-        decoded.forEach((d) => d.close());
-      }
-
-      const pngBlob = await canvasToBlob(canvas, 'png');
+      const item = await buildStitchedItem(allIndices, layout, order, wasUnshuffled);
       if (seq !== renderSeq) return;
-
-      const objectUrl = URL.createObjectURL(pngBlob);
-      const entry = { objectUrl, pngBlob, width, height, revoked: false };
-      previewUrlCache.set(previewKey, entry);
-
-      currentRender = {
-        entry,
-        previewKey,
-        objectUrl,
-        pngBlob,
-        width,
-        height,
-        layout,
-        order: order.slice(),
-        wasUnshuffled,
-      };
-      ui.showStitched(currentRender);
+      galleryItems = [item];
+      activeIndex = 0;
+      ui.showGallery({ items: galleryItems, activeIndex });
     } catch (err) {
       console.error('[XAS] Stitch render failed:', err);
       ui.setBusy(false);
@@ -260,19 +325,104 @@ function createGalleryController(gallery) {
     }
   };
 
-  const handleDownload = async () => {
-    if (!currentRender) return;
+  const renderMixedGallery = async (groupDescriptors) => {
+    const seq = ++renderSeq;
+    ui.setBusy(true);
+    try {
+      const items = await Promise.all(
+        groupDescriptors.map((grp) => {
+          if (grp.type === 'stitched') {
+            return buildStitchedItem(grp.indices, grp.layout, grp.order, grp.wasUnshuffled);
+          }
+          return buildSingleItem(grp.index);
+        }),
+      );
+      if (seq !== renderSeq) return;
+      const firstStitchedIdx = Math.max(
+        0,
+        items.findIndex((item) => item.type === 'stitched'),
+      );
+      galleryItems = items;
+      activeIndex = firstStitchedIdx;
+      ui.showGallery({ items: galleryItems, activeIndex });
+    } catch (err) {
+      console.error('[XAS] Mixed gallery render failed:', err);
+      ui.setBusy(false);
+      showToast(`Stitch failed: ${err.message}`, true);
+    }
+  };
+
+  const updateActiveStitchedGroup = async (layout, customOrder = null, wasUnshuffled = false) => {
+    const current = getActiveItem();
+    if (!current || current.type !== 'stitched' || galleryItems.length <= 1) {
+      return renderSingleGroupView(layout, customOrder, wasUnshuffled);
+    }
+
+    const seq = ++renderSeq;
+    const targetIdx = activeIndex;
+    const indices = current.indices;
+    const order = customOrder || Array.from({ length: indices.length }, (_, i) => i);
+
+    const previewKey = `${gallery.signature}|${indices.join(',')}|${layout}|${order.join(',')}`;
+    const cached = previewUrlCache.get(previewKey);
+    if (!cached || cached.revoked) ui.setBusy(true);
+
+    try {
+      const nextItem = await buildStitchedItem(indices, layout, order, wasUnshuffled);
+      if (seq !== renderSeq || !galleryItems) return;
+      galleryItems = galleryItems.slice();
+      galleryItems[targetIdx] = nextItem;
+      ui.showGallery({ items: galleryItems, activeIndex: targetIdx });
+    } catch (err) {
+      console.error('[XAS] Group re-stitch failed:', err);
+      ui.setBusy(false);
+      showToast(`Stitch failed: ${err.message}`, true);
+    }
+  };
+
+  const handleDownload = async (idx = activeIndex) => {
+    const item = getActiveItem(idx);
+    if (!item) return;
     try {
       const format = config.downloadFormat || 'png';
-      let blob = currentRender.pngBlob;
-      if (format !== 'png') {
-        const { canvas } = await ensureCurrentCanvas();
-        blob = await canvasToBlob(canvas, format, config.downloadQuality);
+      let blob;
+      let layoutTag;
+
+      if (item.type === 'stitched') {
+        blob = item.pngBlob;
+        if (format !== 'png') {
+          const { canvas } = await renderCanvasForStitchedItem(item);
+          blob = await canvasToBlob(canvas, format, config.downloadQuality);
+        }
+        layoutTag =
+          galleryItems.length > 1
+            ? `${item.layout}_p${formatIndexRange(item.indices).replace(/–/g, '-')}`
+            : item.layout;
+      } else {
+        const origBlob = await fetchCachedOrigBlob(gallery.urls[item.index]);
+        const targetMime =
+          format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+        if (origBlob.type === targetMime) {
+          blob = origBlob;
+        } else {
+          const decoded = await decodeImage(origBlob);
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = decoded.width;
+            canvas.height = decoded.height;
+            canvas.getContext('2d').drawImage(decoded.source, 0, 0);
+            blob = await canvasToBlob(canvas, format, config.downloadQuality);
+          } finally {
+            decoded.close();
+          }
+        }
+        layoutTag = `p${item.index + 1}`;
       }
+
       const filename = formatFilename(config.filenameTemplate, {
         handle: gallery.handle,
         tweetId: gallery.tweetId,
-        layout: currentRender.layout,
+        layout: layoutTag,
         ext: format,
       });
       downloadBlob(blob, filename);
@@ -283,60 +433,124 @@ function createGalleryController(gallery) {
     }
   };
 
-  const handleCopy = async () => {
-    if (!currentRender) return;
+  const handleCopy = async (idx = activeIndex) => {
+    const item = getActiveItem(idx);
+    if (!item) return;
     try {
-      await copyPngBlobToClipboard(currentRender.pngBlob);
-      showToast('Copied stitched PNG to clipboard');
+      if (item.type === 'stitched') {
+        await copyPngBlobToClipboard(item.pngBlob);
+        showToast('Copied stitched PNG to clipboard');
+        return;
+      }
+
+      const pngPromise = (async () => {
+        const origBlob = await fetchCachedOrigBlob(gallery.urls[item.index]);
+        if (origBlob.type === 'image/png') return origBlob;
+        const decoded = await decodeImage(origBlob);
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = decoded.width;
+          canvas.height = decoded.height;
+          canvas.getContext('2d').drawImage(decoded.source, 0, 0);
+          return await canvasToBlob(canvas, 'png');
+        } finally {
+          decoded.close();
+        }
+      })();
+      await copyPngBlobToClipboard(pngPromise);
+      showToast('Copied PNG to clipboard');
     } catch (err) {
       console.error('[XAS] Clipboard copy failed:', err);
       showToast(`Clipboard copy failed: ${err.message}`, true);
     }
   };
 
+  const handleSelectGalleryItem = (idx) => {
+    if (!galleryItems || idx < 0 || idx >= galleryItems.length) return;
+    activeIndex = idx;
+    refreshRevokedEntry(galleryItems[activeIndex]);
+    ui.showGallery({ items: galleryItems, activeIndex });
+  };
+
   const handleOpenLightbox = () => {
-    if (!currentRender) return;
-    if (currentRender.entry?.revoked && currentRender.pngBlob) {
-      const freshUrl = URL.createObjectURL(currentRender.pngBlob);
-      const freshEntry = {
-        objectUrl: freshUrl,
-        pngBlob: currentRender.pngBlob,
-        width: currentRender.width,
-        height: currentRender.height,
-        revoked: false,
-      };
-      currentRender.entry = freshEntry;
-      currentRender.objectUrl = freshUrl;
-      if (currentRender.previewKey) {
-        previewUrlCache.set(currentRender.previewKey, freshEntry);
+    if (!galleryItems || galleryItems.length === 0) return;
+    const isMulti = galleryItems.length > 1;
+    const lbItems = galleryItems.map((item) => {
+      if (item.type === 'stitched') {
+        refreshRevokedEntry(item);
+        const rangePart = isMulti ? ` · #${formatIndexRange(item.indices)}` : '';
+        return {
+          url: item.objectUrl,
+          title: `@${gallery.handle}${rangePart} · ${getLayoutLabel(item.layout)}`,
+          width: item.width,
+          height: item.height,
+        };
       }
-    }
+      return {
+        url: buildMediaUrl(gallery.urls[item.index], 'orig'),
+        title: `@${gallery.handle} · #${item.index + 1}`,
+        width: item.width,
+        height: item.height,
+      };
+    });
+
     openLightbox({
-      url: currentRender.objectUrl,
-      title: `@${gallery.handle} · ${getLayoutLabel(currentRender.layout)}`,
-      width: currentRender.width,
-      height: currentRender.height,
-      onDownload: handleDownload,
-      onCopy: handleCopy,
+      items: lbItems,
+      activeIndex,
+      onSelectIndex: (nextIdx) => {
+        if (galleryItems && nextIdx >= 0 && nextIdx < galleryItems.length) {
+          activeIndex = nextIdx;
+          ui.showGallery({ items: galleryItems, activeIndex });
+        }
+      },
+      onDownload: (idx) => handleDownload(idx),
+      onCopy: (idx) => handleCopy(idx),
     });
   };
 
   const handleAutoSolve = async (forcedLayout = null) => {
+    const current = getActiveItem();
+    const isMixedGroupOrderSolve = Boolean(
+      forcedLayout && current && current.type === 'stitched' && galleryItems && galleryItems.length > 1,
+    );
+
     ui.setBusy(true);
     try {
+      if (isMixedGroupOrderSolve) {
+        const subsetUrls = current.indices.map((i) => gallery.urls[i]);
+        const subsetDims = current.indices.map((i) => gallery.origDims?.[i]);
+        const rgbaList = await fetchThumbRgba(subsetUrls, subsetDims);
+        const subResult = detectSplitArtwork(rgbaList, {
+          ...getThresholds(config.sensitivity),
+          allowUnshuffle: true,
+        });
+        const cand = subResult.bestByLayout?.[forcedLayout];
+        if (cand) {
+          const unshuffled = cand.order.some((v, idx) => v !== idx);
+          await updateActiveStitchedGroup(forcedLayout, cand.order, unshuffled);
+          return;
+        }
+        await updateActiveStitchedGroup(forcedLayout);
+        return;
+      }
+
       analysis = await analyzeGallery(gallery, { forceRecompute: true, allowUnshuffle: true });
       if (forcedLayout && analysis.bestByLayout[forcedLayout]) {
         const cand = analysis.bestByLayout[forcedLayout];
         const unshuffled = cand.order.some((v, idx) => v !== idx);
-        await renderStitched(forcedLayout, cand.order, unshuffled);
+        await renderSingleGroupView(forcedLayout, cand.order, unshuffled);
+        return;
+      }
+      if (analysis.isMatch && analysis.isPartial && analysis.groups?.length > 0) {
+        await renderMixedGallery(analysis.groups);
         return;
       }
       if (analysis.winner) {
         const unshuffled = analysis.winner.order.some((v, idx) => v !== idx);
-        await renderStitched(analysis.winner.layout, analysis.winner.order, unshuffled);
+        await renderSingleGroupView(analysis.winner.layout, analysis.winner.order, unshuffled);
       } else {
         const fallbackLayout = getAvailableLayouts(gallery.urls.length)[0];
-        await renderStitched(fallbackLayout);
+        await renderSingleGroupView(fallbackLayout);
       }
     } catch (err) {
       console.error('[XAS] Auto-solve failed:', err);
@@ -347,23 +561,29 @@ function createGalleryController(gallery) {
 
   const ui = createGalleryUI(gallery, {
     onSelectLayout(layout, customOrder, wasUnshuffled) {
-      renderStitched(layout, customOrder, wasUnshuffled);
+      updateActiveStitchedGroup(layout, customOrder, wasUnshuffled);
     },
+    onOpenMixedGallery(groups) {
+      renderMixedGallery(groups);
+    },
+    onSelectGalleryItem: handleSelectGalleryItem,
     onAutoSolve(forcedLayout) {
       handleAutoSolve(forcedLayout);
     },
     onChangeOrder(nextOrder) {
-      if (!currentRender) return;
-      renderStitched(currentRender.layout, nextOrder, false);
+      const current = getActiveItem();
+      if (!current || current.type !== 'stitched') return;
+      updateActiveStitchedGroup(current.layout, nextOrder, false);
     },
     onRestoreOriginal() {
       renderSeq++;
-      currentRender = null;
+      galleryItems = null;
+      activeIndex = 0;
       ui.showOriginal();
     },
     onOpenLightbox: handleOpenLightbox,
-    onDownload: handleDownload,
-    onCopy: handleCopy,
+    onDownload: () => handleDownload(activeIndex),
+    onCopy: () => handleCopy(activeIndex),
     onOpenSettings: openSettings,
   });
 
@@ -377,17 +597,34 @@ function createGalleryController(gallery) {
       .then((result) => {
         analysis = result;
         if (!gallery.container.isConnected) return;
-        if (!result.isMatch || !result.winner) return;
+        if (!result.isMatch) return;
 
+        if (result.isPartial && result.groups?.length > 0) {
+          const stitchedGroups = result.groups.filter((g) => g.type === 'stitched');
+          if (stitchedGroups.length === 0) return;
+          ui.setSuggested({
+            isPartial: true,
+            groups: result.groups,
+            stitchedCount: stitchedGroups.length,
+            primaryGroup: stitchedGroups[0],
+          });
+          if (config.autoStitch && !galleryItems) {
+            renderMixedGallery(result.groups);
+          }
+          return;
+        }
+
+        if (!result.winner) return;
         const suggestion = {
+          isPartial: false,
           layout: result.winner.layout,
           order: result.winner.order,
           wasUnshuffled: result.wasUnshuffled,
         };
         ui.setSuggested(suggestion);
 
-        if (config.autoStitch && !currentRender) {
-          renderStitched(suggestion.layout, suggestion.order, suggestion.wasUnshuffled);
+        if (config.autoStitch && !galleryItems) {
+          renderSingleGroupView(suggestion.layout, suggestion.order, suggestion.wasUnshuffled);
         }
       })
       .catch((err) => {

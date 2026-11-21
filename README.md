@@ -5,7 +5,8 @@ A zero-dependency userscript for **X (Twitter)** that automatically detects, uns
 ## Features
 
 - **Automatic Split-Artwork Detection**: Uses box-filtered edge extraction, linear-extrapolation color matching, pooled 3-channel Pearson correlation (NCC), and smoothed along-seam gradient correlation to recognize real split illustrations while rejecting unrelated multi-image posts (including separate sketches on solid white/black backgrounds).
-- **20-Image Carousel Support**: Passively indexes X's own GraphQL/XHR responses (with React Fiber and DOM fallbacks) so all slices of a virtualized multi-image carousel are stitched immediately without swiping through every slide.
+- **20-Image Carousel & Mixed Gallery Support**: Passively indexes X's own GraphQL/XHR responses (with React Fiber and DOM fallbacks) so all slices of a virtualized multi-image carousel are stitched immediately without swiping through every slide. Mixed carousels (e.g. a 4-slice panorama followed by standalone artworks) automatically open in a combined gallery view with a bottom filmstrip so no standalone image is hidden.
+- **Border-Line Artifact Auto-Trim**: Detects and trims uniform 1–6px dark/light slice border lines along internal seams during both detection and high-res rendering.
 - **Anti-AI / Scrambled Slice Recovery**: Evaluates tile permutations (exhaustive for `N <= 4`, greedy seam chaining for `N > 4`) to restore out-of-order slices automatically, plus an inline click-to-swap order editor for manual overrides.
 - **Rich Layout Support**:
   - 2 images: Horizontal (`1×2`), Vertical (`2×1`)

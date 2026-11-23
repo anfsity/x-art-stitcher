@@ -1,5 +1,8 @@
 # X Art Stitcher
 
+[![Install on Greasy Fork](https://img.shields.io/badge/Greasy%20Fork-Install-670000)](https://greasyfork.org/scripts/606548-x-art-stitcher)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 A zero-dependency userscript for **X (Twitter)** that automatically detects, unshuffles, and stitches split multi-image artist artworks directly in your feed — including **2×2 grids**, **1+2 panels**, and X's **5–20 image vertical-strip carousels**. Built for **ScriptCat**, Violentmonkey, and Tampermonkey on Firefox and Chromium browsers.
 
 ## Features
@@ -19,8 +22,9 @@ A zero-dependency userscript for **X (Twitter)** that automatically detects, uns
 ## Installation (ScriptCat / Violentmonkey / Tampermonkey)
 
 1. Install [ScriptCat](https://docs.scriptcat.org/) (recommended on Firefox/Chrome), Violentmonkey, or Tampermonkey.
-2. Open the raw userscript URL to install with automatic updates:
-   `https://raw.githubusercontent.com/anfsity/x-art-stitcher/main/dist/x-art-stitcher.user.js`
+2. Install the userscript (with automatic updates) from:
+   - **Greasy Fork (Recommended)**: [X Art Stitcher on Greasy Fork](https://greasyfork.org/scripts/606548-x-art-stitcher) ([direct install](https://update.greasyfork.org/scripts/606548/X%20Art%20Stitcher.user.js))
+   - **GitHub (Raw)**: [`dist/x-art-stitcher.user.js`](https://raw.githubusercontent.com/anfsity/x-art-stitcher/main/dist/x-art-stitcher.user.js)
 3. Reload `x.com`. Configure options anytime from the ScriptCat menu (`X Art Stitcher Settings`) or the settings icon on any multi-image tweet.
 
 ## Development

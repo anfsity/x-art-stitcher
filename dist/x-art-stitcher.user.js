@@ -2,7 +2,7 @@
 // @name              X Art Stitcher
 // @name:zh-CN        X 画师拼图自动还原
 // @namespace         https://github.com/anfsity/x-art-stitcher
-// @version           1.0.0
+// @version           1.1.0
 // @description       Automatically detect, unshuffle, and stitch multi-image artist artworks on X (Twitter), plus recognize GIFs and short silent videos for instant MP4-to-GIF / MP4 export with fullscreen lightbox, lossless download, and clipboard copy.
 // @description:zh-CN 自动识别并拼合 X (Twitter) 上画师发布的多图/四宫格/长图/多图轮播及防 AI 乱序切片作品，并自动识别 GIF 与类 GIF 短视频，支持浏览器端无损转存 GIF / 下载 MP4 原视频与全屏高清灯箱预览。
 // @author            anfsity

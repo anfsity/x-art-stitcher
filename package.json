@@ -1,6 +1,6 @@
 {
   "name": "x-art-stitcher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Userscript for X (Twitter) that automatically detects, unshuffles, and stitches multi-image artist artworks.",
   "type": "module",
   "scripts": {

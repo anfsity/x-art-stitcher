@@ -3,6 +3,8 @@ function parseContentType(responseHeaders, fallbackUrl) {
     const match = responseHeaders.match(/^content-type:\s*([^;\r\n]+)/im);
     if (match) return match[1].trim().toLowerCase();
   }
+  if (/format=mp4|\.mp4(?:$|[?:])/i.test(fallbackUrl)) return 'video/mp4';
+  if (/format=gif|\.gif(?:$|[?:])/i.test(fallbackUrl)) return 'image/gif';
   if (/format=png|\.png(?:$|[?:])/i.test(fallbackUrl)) return 'image/png';
   if (/format=webp|\.webp(?:$|[?:])/i.test(fallbackUrl)) return 'image/webp';
   return 'image/jpeg';
@@ -63,6 +65,51 @@ export async function fetchBlobWithFallback(urls) {
     }
   }
   throw lastError || new Error('Failed to fetch image');
+}
+
+export function fetchRangeBuffer(url, startByte = 0, endByte = 65535) {
+  const rangeHeader = `bytes=${startByte}-${endByte}`;
+  return new Promise((resolve, reject) => {
+    const gmRequest =
+      typeof GM_xmlhttpRequest === 'function'
+        ? GM_xmlhttpRequest
+        : typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
+          ? GM.xmlHttpRequest
+          : null;
+
+    if (!gmRequest) {
+      fetch(url, { mode: 'cors', headers: { Range: rangeHeader } })
+        .then(async (res) => {
+          if (res.status !== 200 && res.status !== 206) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          resolve(await res.arrayBuffer());
+        })
+        .catch(reject);
+      return;
+    }
+
+    gmRequest({
+      method: 'GET',
+      url,
+      headers: { Range: rangeHeader },
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      onload(res) {
+        if ((res.status === 200 || res.status === 206) && res.response) {
+          resolve(res.response);
+        } else {
+          reject(new Error(`HTTP ${res.status} for range ${url}`));
+        }
+      },
+      onerror(err) {
+        reject(new Error(`Network error for ${url}: ${err?.error || 'unknown'}`));
+      },
+      ontimeout() {
+        reject(new Error(`Timeout fetching range ${url}`));
+      },
+    });
+  });
 }
 
 export async function decodeImage(blob) {

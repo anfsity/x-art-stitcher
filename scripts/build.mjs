@@ -11,6 +11,8 @@ const MODULE_ORDER = [
   'config.js',
   'gm.js',
   'url.js',
+  'mp4.js',
+  'gif.js',
   'interceptor.js',
   'detector.js',
   'stitcher.js',

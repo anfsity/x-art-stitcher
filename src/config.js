@@ -6,6 +6,13 @@ export const DEFAULT_CONFIG = {
   downloadFormat: 'png', // 'png' | 'jpeg' | 'webp'
   downloadQuality: 0.95,
   filenameTemplate: '@{handle}_{tweetId}_{layout}',
+  enableGifTools: true,
+  autoDetectGifVideos: true,
+  showOnRegularVideos: true,
+  gifFps: 15, // 10 | 15 | 20 | 25
+  gifMaxWidth: 540, // 480 | 540 | 720 | 0 (original)
+  gifQuality: 'balanced', // 'fast' | 'balanced' | 'high'
+  gifMaxDuration: 15, // 8 | 15 | 25 (seconds)
   debug: false,
 };
 

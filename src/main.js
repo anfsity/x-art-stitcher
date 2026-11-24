@@ -1,24 +1,29 @@
 import { getThresholds, loadConfig, saveConfig } from './config.js';
 import { detectSplitArtwork } from './detector.js';
-import { extractGalleriesFromArticle } from './dom.js';
+import { extractGalleriesFromArticle, extractVideosFromArticle } from './dom.js';
+import { transcodeMp4BlobToGif } from './gif.js';
 import {
   copyPngBlobToClipboard,
   decodeImage,
   downloadBlob,
   extractRgbaFromDecoded,
   fetchBlobWithFallback,
+  fetchRangeBuffer,
   injectStyles,
   registerMenu,
 } from './gm.js';
 import { installGraphqlInterceptor, onTweetMediaCaptured } from './interceptor.js';
+import { classifyGifMedia, parseMp4Metadata } from './mp4.js';
 import { canvasToBlob, getAvailableLayouts, renderStitchedCanvas } from './stitcher.js';
 import {
   createGalleryUI,
+  createVideoUI,
   formatIndexRange,
   getLayoutLabel,
   openLightbox,
   openSettingsModal,
   showToast,
+  t,
 } from './ui.js';
 import { buildMediaUrl, formatFilename, getMediaVariantUrls } from './url.js';
 
@@ -105,8 +110,11 @@ async function mapConcurrent(items, limit, worker) {
 let config = loadConfig();
 
 const detectQueue = new TaskQueue(3);
+const videoProbeQueue = new TaskQueue(2);
 const analysisCache = new LruCache(200);
+const videoProbeCache = new LruCache(200);
 const origBlobCache = new LruCache(96);
+const mp4BlobCache = new LruCache(12);
 const previewUrlCache = new LruCache(48, (entry) => {
   if (entry?.objectUrl) {
     URL.revokeObjectURL(entry.objectUrl);
@@ -116,6 +124,8 @@ const previewUrlCache = new LruCache(48, (entry) => {
 
 const containerControllers = new WeakMap();
 const activeControllers = new Set();
+const videoControllers = new WeakMap();
+const activeVideoControllers = new Set();
 
 function debugLog(...args) {
   if (config.debug) {
@@ -650,10 +660,256 @@ function createGalleryController(gallery) {
 
 let visibilityObserver = null;
 
+function formatByteSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function selectVariantForGif(variants, maxWidth) {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  if (maxWidth > 0) {
+    const sufficient = variants.filter((v) => v.width >= maxWidth);
+    if (sufficient.length > 0) {
+      return sufficient[sufficient.length - 1];
+    }
+  }
+  return variants[0];
+}
+
+function getProbeVariant(variants) {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  return variants[variants.length - 1] || variants[0];
+}
+
+async function fetchCachedMp4Blob(urls) {
+  const uniqueUrls = Array.from(new Set(urls.filter(Boolean)));
+  const cacheKey = uniqueUrls[0];
+  let blob = cacheKey ? mp4BlobCache.get(cacheKey) : null;
+  if (!blob) {
+    blob = await fetchBlobWithFallback(uniqueUrls);
+    if (cacheKey) mp4BlobCache.set(cacheKey, blob);
+  }
+  return blob;
+}
+
+function createVideoController(target) {
+  const probeVariant = getProbeVariant(target.variants);
+  const probeKey = target.mediaKey || probeVariant?.url || target.bestMp4Url;
+  const cachedProbe = probeKey ? videoProbeCache.get(probeKey) : null;
+
+  let classification = classifyGifMedia({
+    type: target.type,
+    mp4Url: target.bestMp4Url,
+    posterUrl: target.posterUrl,
+    hasGifBadge: target.hasGifBadge,
+    durationMs: target.durationMs,
+    mp4Probe: cachedProbe,
+    maxAutoDurationSec: 12,
+  });
+
+  let probeStarted = Boolean(cachedProbe);
+  let activeJob = null;
+
+  const isVisible = () =>
+    Boolean(config.enableGifTools && (classification !== 'video' || config.showOnRegularVideos));
+
+  const handleExportGif = async () => {
+    if (activeJob) return;
+    const job = { cancelled: false };
+    activeJob = job;
+
+    const selected = selectVariantForGif(target.variants, config.gifMaxWidth);
+    const candidateUrls = [selected?.url, target.bestMp4Url];
+
+    ui.setProgress({ stage: 'fetch', progress: null });
+    try {
+      const mp4Blob = await fetchCachedMp4Blob(candidateUrls);
+      if (job.cancelled) throw new Error('Cancelled');
+
+      const result = await transcodeMp4BlobToGif(mp4Blob, {
+        fps: Number(config.gifFps) || 15,
+        maxWidth: Number(config.gifMaxWidth) || 0,
+        quality: config.gifQuality || 'balanced',
+        maxDurationSec: Number(config.gifMaxDuration) || 15,
+        onProgress: (info) => {
+          if (!job.cancelled) ui.setProgress(info);
+        },
+        isCancelled: () => job.cancelled,
+      });
+
+      if (job.cancelled) throw new Error('Cancelled');
+
+      const layoutTag = target.videoCount > 1 ? `gif_v${target.videoIndex + 1}` : 'gif';
+      const filename = formatFilename(config.filenameTemplate, {
+        handle: target.handle,
+        tweetId: target.tweetId,
+        layout: layoutTag,
+        ext: 'gif',
+      });
+      downloadBlob(result.blob, filename);
+
+      const summary = `${result.width}×${result.height}, ${formatByteSize(result.blob.size)}`;
+      const truncNote = result.truncated
+        ? ` (first ${Number(config.gifMaxDuration) || 15}s)`
+        : '';
+      showToast(`Saved ${filename} (${summary})${truncNote}`);
+    } catch (err) {
+      if (job.cancelled || err?.message === 'Cancelled') {
+        showToast(t('gifCancelled'));
+      } else {
+        console.error('[XAS] GIF export failed:', err);
+        showToast(`GIF export failed: ${err.message}`, true);
+      }
+    } finally {
+      if (activeJob === job) {
+        activeJob = null;
+      }
+      ui.setProgress(null);
+    }
+  };
+
+  const handleDownloadMp4 = async () => {
+    if (activeJob) return;
+    const job = { cancelled: false };
+    activeJob = job;
+
+    ui.setProgress({ stage: 'fetch', progress: null });
+    try {
+      const mp4Blob = await fetchCachedMp4Blob(target.variants.map((v) => v.url));
+      if (job.cancelled) throw new Error('Cancelled');
+
+      const layoutTag = target.videoCount > 1 ? `video_v${target.videoIndex + 1}` : 'video';
+      const filename = formatFilename(config.filenameTemplate, {
+        handle: target.handle,
+        tweetId: target.tweetId,
+        layout: layoutTag,
+        ext: 'mp4',
+      });
+      downloadBlob(mp4Blob, filename);
+      showToast(`Downloaded ${filename} (${formatByteSize(mp4Blob.size)})`);
+    } catch (err) {
+      if (job.cancelled || err?.message === 'Cancelled') {
+        showToast(t('gifCancelled'));
+      } else {
+        console.error('[XAS] MP4 download failed:', err);
+        showToast(`MP4 download failed: ${err.message}`, true);
+      }
+    } finally {
+      if (activeJob === job) {
+        activeJob = null;
+      }
+      ui.setProgress(null);
+    }
+  };
+
+  const ui = createVideoUI(
+    { ...target, classification, visible: isVisible() },
+    {
+      onExportGif: handleExportGif,
+      onDownloadMp4: handleDownloadMp4,
+      onCancel: () => {
+        if (activeJob) activeJob.cancelled = true;
+      },
+      onOpenSettings: openSettings,
+    },
+  );
+
+  const triggerAutoProbe = () => {
+    if (
+      probeStarted ||
+      !config.enableGifTools ||
+      !config.autoDetectGifVideos ||
+      classification !== 'video' ||
+      !(target.durationMs > 0 && target.durationMs <= 12000) ||
+      !probeVariant?.url
+    ) {
+      return;
+    }
+    probeStarted = true;
+
+    videoProbeQueue
+      .enqueue(async () => {
+        const cached = probeKey ? videoProbeCache.get(probeKey) : null;
+        if (cached) return cached;
+        const buf = await fetchRangeBuffer(probeVariant.url, 0, 65535);
+        const parsed = parseMp4Metadata(buf);
+        if (probeKey) videoProbeCache.set(probeKey, parsed);
+        return parsed;
+      })
+      .then((mp4Probe) => {
+        if (!target.container.isConnected) return;
+        const nextClass = classifyGifMedia({
+          type: target.type,
+          mp4Url: target.bestMp4Url,
+          posterUrl: target.posterUrl,
+          hasGifBadge: target.hasGifBadge,
+          durationMs: target.durationMs,
+          mp4Probe,
+          maxAutoDurationSec: 12,
+        });
+
+        debugLog('Probed video header', {
+          handle: target.handle,
+          tweetId: target.tweetId,
+          durationMs: target.durationMs,
+          hasMoov: mp4Probe.hasMoov,
+          complete: mp4Probe.complete,
+          hasAudio: mp4Probe.hasAudio,
+          classification: nextClass,
+        });
+
+        if (nextClass !== classification) {
+          classification = nextClass;
+          ui.setClassification(classification);
+          ui.setVisible(isVisible());
+        }
+      })
+      .catch((err) => {
+        debugLog('Video header probe skipped:', err);
+      });
+  };
+
+  const controller = {
+    target,
+    signature: target.signature,
+    triggerAutoProbe,
+    refreshConfig() {
+      ui.setVisible(isVisible());
+      if (
+        !probeStarted &&
+        config.enableGifTools &&
+        config.autoDetectGifVideos &&
+        classification === 'video' &&
+        target.durationMs > 0 &&
+        target.durationMs <= 12000 &&
+        visibilityObserver &&
+        target.container.isConnected
+      ) {
+        visibilityObserver.observe(target.container);
+      }
+    },
+    destroy() {
+      if (activeJob) activeJob.cancelled = true;
+      visibilityObserver?.unobserve(target.container);
+      ui.destroy();
+      activeVideoControllers.delete(controller);
+    },
+  };
+
+  activeVideoControllers.add(controller);
+  return controller;
+}
+
 function scanPage() {
   for (const ctrl of activeControllers) {
     if (!ctrl.gallery.container.isConnected) {
       activeControllers.delete(ctrl);
+    }
+  }
+  for (const vctrl of activeVideoControllers) {
+    if (!vctrl.target.container.isConnected) {
+      activeVideoControllers.delete(vctrl);
     }
   }
 
@@ -672,6 +928,23 @@ function scanPage() {
       containerControllers.set(gallery.container, ctrl);
       if (config.autoDetect && visibilityObserver) {
         visibilityObserver.observe(gallery.container);
+      }
+    }
+
+    if (config.enableGifTools) {
+      const videos = extractVideosFromArticle(article);
+      for (const target of videos) {
+        const existing = videoControllers.get(target.container);
+        if (existing) {
+          if (existing.signature === target.signature) continue;
+          existing.destroy();
+        }
+
+        const vctrl = createVideoController(target);
+        videoControllers.set(target.container, vctrl);
+        if (config.autoDetectGifVideos && visibilityObserver) {
+          visibilityObserver.observe(target.container);
+        }
       }
     }
   }
@@ -699,6 +972,12 @@ function openSettings() {
         }
       }
     }
+    for (const vctrl of activeVideoControllers) {
+      if (vctrl.target.container.isConnected) {
+        vctrl.refreshConfig();
+      }
+    }
+    scheduleScan();
   });
 }
 
@@ -723,10 +1002,19 @@ function initDom() {
     (entries) => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
+        let handled = false;
         const ctrl = containerControllers.get(entry.target);
         if (ctrl) {
-          visibilityObserver.unobserve(entry.target);
           ctrl.triggerAutoDetect();
+          handled = true;
+        }
+        const vctrl = videoControllers.get(entry.target);
+        if (vctrl) {
+          vctrl.triggerAutoProbe();
+          handled = true;
+        }
+        if (handled) {
+          visibilityObserver.unobserve(entry.target);
         }
       }
     },
@@ -745,7 +1033,10 @@ function initDom() {
           return;
         }
       }
-      if (mutation.type === 'attributes' && mutation.target.tagName === 'IMG') {
+      if (
+        mutation.type === 'attributes' &&
+        (mutation.target.tagName === 'IMG' || mutation.target.tagName === 'VIDEO')
+      ) {
         scheduleScan();
         return;
       }
@@ -756,7 +1047,7 @@ function initDom() {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['src'],
+    attributeFilter: ['src', 'poster'],
   });
 
   scheduleScan();

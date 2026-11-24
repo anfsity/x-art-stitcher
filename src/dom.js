@@ -1,5 +1,17 @@
-import { extractTweetMediaFromReactFiber, getRegisteredTweetMedia } from './interceptor.js';
-import { isTweetMediaUrl, parseStatusHref } from './url.js';
+import {
+  extractTweetMediaFromReactFiber,
+  extractTweetVideosFromReactFiber,
+  getRegisteredTweetMedia,
+  getRegisteredTweetVideos,
+  getRegisteredVideoByMediaKey,
+} from './interceptor.js';
+import {
+  extractVideoMediaKey,
+  isTweetMediaUrl,
+  isTweetVideoUrl,
+  parseStatusHref,
+  parseVariantDimensions,
+} from './url.js';
 
 function findLowestCommonAncestor(elements, boundary) {
   if (elements.length === 0) return null;
@@ -177,4 +189,178 @@ export function extractGalleriesFromArticle(article) {
   }
 
   return galleries;
+}
+
+function detectGifBadgeInContainer(container, videoEl) {
+  const containerLabel = container.getAttribute?.('aria-label') || '';
+  const videoLabel = videoEl?.getAttribute?.('aria-label') || '';
+  const playerEl = container.querySelector('[data-testid="videoPlayer"]');
+  const playerLabel = playerEl?.getAttribute?.('aria-label') || '';
+  if (/\bGIF\b/i.test(containerLabel) || /\bGIF\b/i.test(videoLabel) || /\bGIF\b/i.test(playerLabel)) {
+    return true;
+  }
+
+  const badges = container.querySelectorAll('span, div');
+  for (const el of badges) {
+    if (el.closest('.xas-injected, button, [role="button"]')) continue;
+    if (el.children.length === 0 && el.textContent?.trim() === 'GIF') {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveVideoStatusInfo(container, fallbackMeta) {
+  const isQuoted = Boolean(container.closest('[tabindex="0"][role="link"]'));
+  const anchor = container.closest('a[href*="/status/"]');
+  let parsed = anchor ? parseStatusHref(anchor.getAttribute('href')) : null;
+  if (!parsed && isQuoted) {
+    const quoteCard = container.closest('[tabindex="0"][role="link"]');
+    const quoteLink =
+      quoteCard?.querySelector('time')?.closest('a[href*="/status/"]') ||
+      quoteCard?.querySelector('a[href*="/status/"]');
+    if (quoteLink) parsed = parseStatusHref(quoteLink.getAttribute('href'));
+  }
+  const handle = parsed?.handle || fallbackMeta.handle;
+  const tweetId =
+    parsed?.tweetId || (isQuoted ? `${fallbackMeta.tweetId}_quote` : fallbackMeta.tweetId);
+  return { isQuoted, handle, tweetId };
+}
+
+function collectVideoPlayerContainers(article) {
+  const compNodes = Array.from(article.querySelectorAll('[data-testid="videoComponent"]'));
+  const playerNodes = Array.from(article.querySelectorAll('[data-testid="videoPlayer"]'));
+  const candidates = [];
+
+  for (const node of compNodes) {
+    if (node.closest('.xas-injected') || node.closest('[data-testid="card.wrapper"]')) continue;
+    candidates.push(node);
+  }
+  for (const node of playerNodes) {
+    if (node.closest('.xas-injected') || node.closest('[data-testid="card.wrapper"]')) continue;
+    if (candidates.some((c) => c === node || c.contains(node) || node.contains(c))) continue;
+    candidates.push(node);
+  }
+
+  return candidates.filter((node) => !candidates.some((other) => other !== node && other.contains(node)));
+}
+
+/**
+ * Scan a tweet <article> for X GIFs and videos, correlating DOM video players
+ * with GraphQL / React Fiber MP4 variant metadata.
+ */
+export function extractVideosFromArticle(article) {
+  const containers = collectVideoPlayerContainers(article);
+  if (containers.length === 0) return [];
+
+  const fallbackMeta = getFallbackStatusInfo(article);
+  const perTweetIndices = new Map();
+  const preliminary = [];
+
+  for (const container of containers) {
+    const { isQuoted, handle, tweetId } = resolveVideoStatusInfo(container, fallbackMeta);
+    const videoIndex = perTweetIndices.get(tweetId) || 0;
+    perTweetIndices.set(tweetId, videoIndex + 1);
+
+    const videoEl = container.querySelector('video');
+    const sourceSrc = videoEl?.querySelector('source')?.getAttribute('src') || '';
+    const rawVideoSrc =
+      videoEl?.currentSrc || videoEl?.getAttribute('src') || videoEl?.src || sourceSrc || '';
+    const directMp4Url =
+      isTweetVideoUrl(rawVideoSrc) &&
+      !/\.m3u8(?:$|\?)/i.test(rawVideoSrc) &&
+      !rawVideoSrc.startsWith('blob:')
+        ? rawVideoSrc
+        : null;
+
+    const posterAttr = videoEl?.getAttribute('poster') || videoEl?.poster || '';
+    const posterImg = container.querySelector('img');
+    const posterImgSrc = posterImg?.getAttribute('src') || posterImg?.src || '';
+
+    const domMediaKey =
+      extractVideoMediaKey(directMp4Url) ||
+      extractVideoMediaKey(posterAttr) ||
+      extractVideoMediaKey(posterImgSrc);
+
+    const hasGifBadge = detectGifBadgeInContainer(container, videoEl);
+
+    const byKey = domMediaKey ? getRegisteredVideoByMediaKey(domMediaKey) : null;
+    const byTweet = getRegisteredTweetVideos(tweetId);
+    const byFiber = !byKey && !byTweet && !isQuoted ? extractTweetVideosFromReactFiber(article, tweetId) : null;
+    const tweetEntry = byTweet || byFiber;
+
+    let metaItem = null;
+    let resolvedHandle = handle;
+
+    if (byKey) {
+      metaItem = byKey;
+      if (byKey.handle) resolvedHandle = byKey.handle;
+    } else if (tweetEntry && Array.isArray(tweetEntry.videos) && tweetEntry.videos.length > 0) {
+      metaItem =
+        (domMediaKey && tweetEntry.videos.find((v) => v.mediaKey === domMediaKey)) ||
+        tweetEntry.videos[videoIndex] ||
+        (tweetEntry.videos.length === 1 ? tweetEntry.videos[0] : null);
+      if (tweetEntry.handle) resolvedHandle = tweetEntry.handle;
+    } else if (directMp4Url) {
+      const dims = parseVariantDimensions(directMp4Url);
+      metaItem = {
+        mediaId: null,
+        mediaKey: domMediaKey || extractVideoMediaKey(directMp4Url) || directMp4Url,
+        type: hasGifBadge || /\/tweet_video\//i.test(directMp4Url) ? 'animated_gif' : 'video',
+        posterUrl: posterAttr || posterImgSrc || null,
+        width: videoEl?.videoWidth || dims.width || 0,
+        height: videoEl?.videoHeight || dims.height || 0,
+        durationMs:
+          Number.isFinite(videoEl?.duration) && videoEl.duration > 0
+            ? Math.round(videoEl.duration * 1000)
+            : 0,
+        variants: [{ url: directMp4Url, bitrate: 0, ...dims }],
+        bestMp4Url: directMp4Url,
+      };
+    }
+
+    if (!metaItem || !Array.isArray(metaItem.variants) || metaItem.variants.length === 0) {
+      continue;
+    }
+
+    const durationMs =
+      metaItem.durationMs > 0
+        ? metaItem.durationMs
+        : Number.isFinite(videoEl?.duration) && videoEl.duration > 0
+          ? Math.round(videoEl.duration * 1000)
+          : 0;
+
+    const mediaKey = metaItem.mediaKey || domMediaKey || extractVideoMediaKey(metaItem.bestMp4Url);
+    const signature = [
+      tweetId,
+      mediaKey || 'nokey',
+      metaItem.bestMp4Url,
+      metaItem.variants.length,
+      hasGifBadge ? 'gif' : 'v',
+    ].join('|');
+
+    preliminary.push({
+      article,
+      container,
+      handle: resolvedHandle,
+      tweetId,
+      isQuoted,
+      signature,
+      mediaKey,
+      videoIndex,
+      type: metaItem.type,
+      posterUrl: metaItem.posterUrl || posterAttr || posterImgSrc || null,
+      durationMs,
+      width: metaItem.width || videoEl?.videoWidth || 0,
+      height: metaItem.height || videoEl?.videoHeight || 0,
+      variants: metaItem.variants,
+      bestMp4Url: metaItem.bestMp4Url,
+      hasGifBadge,
+    });
+  }
+
+  return preliminary.map((item) => ({
+    ...item,
+    videoCount: perTweetIndices.get(item.tweetId) || 1,
+  }));
 }

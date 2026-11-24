@@ -1,26 +1,69 @@
+import { extractVideoMediaKey, parseVariantDimensions } from './url.js';
+
 const MAX_REGISTRY_ENTRIES = 1200;
+const MAX_VIDEO_KEY_ENTRIES = 2400;
 const tweetMediaRegistry = new Map();
+const tweetVideoRegistry = new Map();
+const videoByMediaKeyRegistry = new Map();
 const captureListeners = new Set();
+
+function setBoundedEntry(map, key, val, limit) {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, val);
+  while (map.size > limit) {
+    const oldestKey = map.keys().next().value;
+    map.delete(oldestKey);
+  }
+}
 
 function storeTweetMedia(tweetId, entry) {
   if (!tweetId || !entry || !Array.isArray(entry.photos) || entry.photos.length < 2) return false;
   const existing = tweetMediaRegistry.get(tweetId);
   if (existing && existing.photos.length >= entry.photos.length) return false;
 
-  if (tweetMediaRegistry.has(tweetId)) {
-    tweetMediaRegistry.delete(tweetId);
+  setBoundedEntry(tweetMediaRegistry, tweetId, entry, MAX_REGISTRY_ENTRIES);
+  return true;
+}
+
+function indexVideosByMediaKey(tweetId, handle, videos) {
+  for (const video of videos) {
+    if (!video.mediaKey) continue;
+    const existing = videoByMediaKeyRegistry.get(video.mediaKey);
+    if (existing && existing.variants.length >= video.variants.length) continue;
+    setBoundedEntry(
+      videoByMediaKeyRegistry,
+      video.mediaKey,
+      { ...video, handle: handle || existing?.handle || null, tweetId },
+      MAX_VIDEO_KEY_ENTRIES,
+    );
   }
-  tweetMediaRegistry.set(tweetId, entry);
-  while (tweetMediaRegistry.size > MAX_REGISTRY_ENTRIES) {
-    const oldestKey = tweetMediaRegistry.keys().next().value;
-    tweetMediaRegistry.delete(oldestKey);
-  }
+}
+
+function storeTweetVideos(tweetId, entry) {
+  if (!tweetId || !entry || !Array.isArray(entry.videos) || entry.videos.length === 0) return false;
+  indexVideosByMediaKey(tweetId, entry.handle, entry.videos);
+  const existing = tweetVideoRegistry.get(tweetId);
+  if (existing && existing.videos.length >= entry.videos.length) return false;
+
+  setBoundedEntry(tweetVideoRegistry, tweetId, entry, MAX_REGISTRY_ENTRIES);
   return true;
 }
 
 export function getRegisteredTweetMedia(tweetId) {
   if (!tweetId) return null;
   return tweetMediaRegistry.get(String(tweetId)) || null;
+}
+
+export function getRegisteredTweetVideos(tweetId) {
+  if (!tweetId) return null;
+  return tweetVideoRegistry.get(String(tweetId)) || null;
+}
+
+export function getRegisteredVideoByMediaKey(mediaKey) {
+  if (!mediaKey) return null;
+  return videoByMediaKeyRegistry.get(String(mediaKey)) || null;
 }
 
 export function onTweetMediaCaptured(listener) {
@@ -63,10 +106,52 @@ function normalizePhotoMediaList(mediaList) {
   return photos.length >= 2 ? photos : null;
 }
 
+function normalizeVideoMediaList(mediaList) {
+  if (!Array.isArray(mediaList) || mediaList.length === 0) return null;
+  const videos = [];
+  for (const item of mediaList) {
+    if (!item || (item.type !== 'animated_gif' && item.type !== 'video')) continue;
+    const rawVariants = item.video_info?.variants;
+    if (!Array.isArray(rawVariants) || rawVariants.length === 0) continue;
+
+    const variants = rawVariants
+      .filter((v) => v && v.content_type === 'video/mp4' && typeof v.url === 'string' && v.url)
+      .map((v) => ({
+        url: v.url,
+        bitrate: Number(v.bitrate) || 0,
+        ...parseVariantDimensions(v.url),
+      }))
+      .sort((a, b) => b.bitrate - a.bitrate);
+
+    if (variants.length === 0) continue;
+
+    const posterUrl = item.media_url_https || item.media_url || null;
+    const bestMp4Url = variants[0].url;
+    const mediaKey = extractVideoMediaKey(posterUrl) || extractVideoMediaKey(bestMp4Url);
+    const width = Number(item.original_info?.width) || variants[0].width || 0;
+    const height = Number(item.original_info?.height) || variants[0].height || 0;
+    const durationMs = Number(item.video_info?.duration_millis) || 0;
+    const mediaId = item.id_str ? String(item.id_str) : null;
+
+    videos.push({
+      mediaId,
+      mediaKey,
+      type: item.type,
+      posterUrl,
+      width,
+      height,
+      durationMs,
+      variants,
+      bestMp4Url,
+    });
+  }
+  return videos.length > 0 ? videos : null;
+}
+
 /**
  * Recursively walk an X GraphQL or REST JSON payload and index every multi-photo
- * tweet by rest_id. This captures all photos even when X virtualizes 5-20 image
- * carousels in the DOM.
+ * and video/GIF tweet by rest_id. This captures all photos and MP4 variants
+ * even when X virtualizes 5-20 image carousels or HLS playback in the DOM.
  */
 export function ingestGraphqlObject(root) {
   if (!root || typeof root !== 'object') return 0;
@@ -96,13 +181,21 @@ export function ingestGraphqlObject(root) {
       legacy?.entities?.media;
 
     if (tweetId && Array.isArray(mediaList)) {
+      const handle = extractScreenName(cur);
+      const idStr = String(tweetId);
+      let storedThisTweet = false;
+
       const photos = normalizePhotoMediaList(mediaList);
-      if (photos) {
-        const handle = extractScreenName(cur);
-        if (storeTweetMedia(String(tweetId), { handle, photos })) {
-          added++;
-        }
+      if (photos && storeTweetMedia(idStr, { handle, photos })) {
+        storedThisTweet = true;
       }
+
+      const videos = normalizeVideoMediaList(mediaList);
+      if (videos && storeTweetVideos(idStr, { handle, videos })) {
+        storedThisTweet = true;
+      }
+
+      if (storedThisTweet) added++;
     }
 
     const keys = Object.keys(cur);
@@ -119,7 +212,7 @@ export function ingestGraphqlObject(root) {
 
 function ingestJsonText(text) {
   if (!text || typeof text !== 'string' || text.length < 40) return;
-  if (!text.includes('pbs.twimg.com/media/')) return;
+  if (!text.includes('pbs.twimg.com/media/') && !text.includes('video.twimg.com/')) return;
   try {
     const parsed = JSON.parse(text);
     const added = ingestGraphqlObject(parsed);
@@ -138,12 +231,7 @@ function isInterestingApiUrl(url) {
   );
 }
 
-/**
- * Fallback media extractor that reads tweet media entities directly from X's
- * React Fiber tree on an <article> node when a tweet rendered before network
- * interception attached.
- */
-export function extractTweetMediaFromReactFiber(article, targetTweetId = null) {
+function walkReactFiberForTweet(article, targetTweetId, extractMedia) {
   try {
     const raw = article?.wrappedJSObject || article;
     if (!raw) return null;
@@ -177,12 +265,8 @@ export function extractTweetMediaFromReactFiber(article, targetTweetId = null) {
             cand.extended_entities?.media ||
             cand.legacy?.extended_entities?.media ||
             cand.entities?.media;
-          const photos = normalizePhotoMediaList(mediaList);
-          if (photos) {
-            const handle = extractScreenName(cand);
-            if (id) storeTweetMedia(String(id), { handle, photos });
-            return { handle, photos };
-          }
+          const result = extractMedia(cand, id, mediaList);
+          if (result) return result;
         }
       }
 
@@ -193,6 +277,35 @@ export function extractTweetMediaFromReactFiber(article, targetTweetId = null) {
     // Gracefully fall back to DOM extraction when Xray/React internals block access.
   }
   return null;
+}
+
+/**
+ * Fallback media extractor that reads tweet media entities directly from X's
+ * React Fiber tree on an <article> node when a tweet rendered before network
+ * interception attached.
+ */
+export function extractTweetMediaFromReactFiber(article, targetTweetId = null) {
+  return walkReactFiberForTweet(article, targetTweetId, (cand, id, mediaList) => {
+    const photos = normalizePhotoMediaList(mediaList);
+    if (!photos) return null;
+    const handle = extractScreenName(cand);
+    if (id) storeTweetMedia(String(id), { handle, photos });
+    return { handle, photos };
+  });
+}
+
+/**
+ * Fallback video/GIF extractor that reads tweet video entities from X's
+ * React Fiber tree when a tweet rendered before network interception attached.
+ */
+export function extractTweetVideosFromReactFiber(article, targetTweetId = null) {
+  return walkReactFiberForTweet(article, targetTweetId, (cand, id, mediaList) => {
+    const videos = normalizeVideoMediaList(mediaList);
+    if (!videos) return null;
+    const handle = extractScreenName(cand);
+    if (id) storeTweetVideos(String(id), { handle, videos });
+    return { handle, videos };
+  });
 }
 
 let interceptorInstalled = false;

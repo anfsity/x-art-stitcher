@@ -1,5 +1,6 @@
 import { createIcon } from './icons.js';
 import { getAvailableLayouts } from './stitcher.js';
+import { formatFilename } from './url.js';
 
 const IS_ZH = typeof navigator !== 'undefined' && /^zh/i.test(navigator.language || '');
 
@@ -35,6 +36,12 @@ const TEXT = {
     ? '滚轮缩放 · 拖拽平移 · ←/→ 切换画廊 · 单击适应/1:1 · D 下载 / C 复制 / ESC 关闭'
     : 'Wheel zoom · Drag pan · ←/→ switch item · Click Fit/1:1 · D download / C copy / ESC close',
   settingsHeading: IS_ZH ? 'X Art Stitcher 设置' : 'X Art Stitcher Settings',
+  settingsSubtitle: IS_ZH
+    ? '拼图检测、GIF 转存与导出偏好设置'
+    : 'Stitching, GIF conversion & export preferences',
+  sectionStitching: IS_ZH ? '画作拼图' : 'Artwork Stitching',
+  sectionGifVideo: IS_ZH ? 'GIF 与视频导出' : 'GIF & Video Export',
+  sectionOutput: IS_ZH ? '输出与高级设置' : 'Output & Advanced',
   optAutoDetect: IS_ZH ? '自动识别多图拼图' : 'Auto-detect split artworks',
   optAutoDetectDesc: IS_ZH
     ? '进入视野时分析边缘像素连续性，判断是否为拆分画作'
@@ -48,17 +55,74 @@ const TEXT = {
     ? '根据相邻边相似度尝试还原被打乱顺序的切片'
     : 'Search tile permutations to restore scrambled multi-image slices',
   optSensitivity: IS_ZH ? '自动识别灵敏度' : 'Detection sensitivity',
-  sensStrict: IS_ZH ? '严格（极少误判）' : 'Strict (fewest false positives)',
-  sensNormal: IS_ZH ? '标准（推荐）' : 'Normal (recommended)',
-  sensLoose: IS_ZH ? '宽松（适配大缝隙/重压缩）' : 'Loose (handles wider gaps)',
-  optFormat: IS_ZH ? '下载图片格式' : 'Download format',
+  optSensitivityDesc: IS_ZH
+    ? '控制边缘拼接判定阈值与抗压缩容差'
+    : 'Controls seam-matching strictness and compression tolerance',
+  sensStrict: IS_ZH ? '严格' : 'Strict',
+  sensNormal: IS_ZH ? '标准' : 'Normal',
+  sensLoose: IS_ZH ? '宽松' : 'Loose',
+  optEnableGifTools: IS_ZH ? '启用 GIF / 视频导出工具' : 'Enable GIF & video export tools',
+  optEnableGifToolsDesc: IS_ZH
+    ? '在 X 的 GIF 与视频播放器右上角显示转存 GIF / 下载 MP4 悬浮控制条'
+    : 'Show floating GIF conversion and MP4 download controls on X videos',
+  optAutoDetectGifVideos: IS_ZH ? '自动识别类 GIF 无声短视频' : 'Auto-detect GIF-like silent videos',
+  optAutoDetectGifVideosDesc: IS_ZH
+    ? '自动探测短时无音轨视频的 MP4 头信息并高亮提示转存为 GIF'
+    : 'Probe short silent MP4 headers and highlight them for instant GIF export',
+  optShowOnRegularVideos: IS_ZH ? '在普通视频上显示折叠按钮' : 'Show compact button on regular videos',
+  optShowOnRegularVideosDesc: IS_ZH
+    ? '为包含音轨或较长的普通视频提供轻量化 GIF / MP4 导出入口'
+    : 'Keep a subtle collapsed GIF / MP4 pill on regular videos',
+  optGifFps: IS_ZH ? 'GIF 导出帧率' : 'GIF frame rate',
+  optGifFpsDesc: IS_ZH
+    ? '原生 GIF 会尽量保留原有帧节奏，高帧率视频将平滑降采样'
+    : 'Native GIFs preserve cadence when possible; higher FPS clips resample smoothly',
+  optGifMaxWidth: IS_ZH ? 'GIF 最大宽度' : 'GIF max width',
+  optGifMaxWidthDesc: IS_ZH
+    ? '超过该宽度的视频将按比例缩小，以平衡清晰度与文件体积'
+    : 'Downscales wider videos proportionally to balance sharpness and file size',
+  optWidthOrig: IS_ZH ? '原尺寸' : 'Orig',
+  optGifQuality: IS_ZH ? 'GIF 编码质量' : 'GIF encoding quality',
+  optGifQualityDesc: IS_ZH
+    ? '“均衡”使用有序抖动与帧间差分裁剪；“高画质”每帧独立生成调色板'
+    : 'Balanced uses ordered dithering & delta cropping; High builds per-frame palettes',
+  qualFast: IS_ZH ? '极速' : 'Fast',
+  qualBalanced: IS_ZH ? '均衡' : 'Balanced',
+  qualHigh: IS_ZH ? '高画质' : 'High',
+  optGifMaxDuration: IS_ZH ? 'GIF 最大截取时长' : 'Max GIF clip duration',
+  optGifMaxDurationDesc: IS_ZH
+    ? '超长视频将截取前若干秒进行转码，防止浏览器内存占用过高'
+    : 'Clips longer than this limit export only the opening segment',
+  optFormat: IS_ZH ? '图片下载格式' : 'Image download format',
+  optFormatDesc: IS_ZH
+    ? '适用于拼合画作及单图下载（GIF 导出固定为 .gif）'
+    : 'Applies to stitched and standalone images (GIF export always outputs .gif)',
   optTemplate: IS_ZH ? '下载文件名模板' : 'Filename template',
   optTemplateDesc: IS_ZH
     ? '可用占位符: {handle}, {tweetId}, {layout}'
     : 'Placeholders: {handle}, {tweetId}, {layout}',
+  previewPrefix: IS_ZH ? '预览: ' : 'Preview: ',
   optDebug: IS_ZH ? '控制台输出调试日志' : 'Console debug logging',
+  optDebugDesc: IS_ZH
+    ? '在浏览器开发者工具中记录检测分数与视频探测信息'
+    : 'Print detection scores and MP4 probe metadata to console',
   save: IS_ZH ? '保存' : 'Save',
   cancel: IS_ZH ? '取消' : 'Cancel',
+  gifLabel: 'GIF',
+  mp4Label: 'MP4',
+  exportGifLabel: IS_ZH ? '导出 GIF' : 'Export GIF',
+  saveGifTitle: IS_ZH ? '转码并下载 .gif 动图' : 'Convert and download as .gif',
+  saveGifLikeTitle: IS_ZH
+    ? '检测到无声类 GIF 短视频 — 点击转码下载 .gif'
+    : 'Silent GIF-like video detected — click to save .gif',
+  expandVideoToolsTitle: IS_ZH ? '展开 GIF / MP4 导出选项' : 'Expand GIF / MP4 export controls',
+  collapseVideoToolsTitle: IS_ZH ? '收起' : 'Collapse',
+  downloadMp4Title: IS_ZH ? '下载原始 .mp4 视频' : 'Download raw .mp4 video',
+  cancelGifTitle: IS_ZH ? '取消当前任务' : 'Cancel current task',
+  stageFetch: IS_ZH ? '获取视频中...' : 'Fetching MP4...',
+  stageExtract: IS_ZH ? '抽帧' : 'Extracting',
+  stageEncode: IS_ZH ? '编码 GIF' : 'Encoding GIF',
+  gifCancelled: IS_ZH ? '已取消 GIF 导出' : 'GIF export cancelled',
 };
 
 export function t(key) {
@@ -438,131 +502,345 @@ export function openLightbox({
   loadSlide(currentIdx);
 }
 
+function isPageLightTheme() {
+  try {
+    for (const el of [document.body, document.documentElement]) {
+      if (!el) continue;
+      const bg = window.getComputedStyle(el).backgroundColor;
+      const match = bg && bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
+      if (!match) continue;
+      const alpha = match[4] !== undefined ? Number(match[4]) : 1;
+      if (alpha === 0) continue;
+      const lum = (0.299 * Number(match[1]) + 0.587 * Number(match[2]) + 0.114 * Number(match[3])) / 255;
+      return lum > 0.5;
+    }
+  } catch (_) {
+    // Default to dark tonal theme if computed style is unavailable.
+  }
+  return false;
+}
+
+let activeModalCleanup = null;
+
 export function openSettingsModal(currentConfig, onSave) {
-  const existing = document.querySelector('.xas-modal-backdrop');
-  if (existing) existing.remove();
+  if (activeModalCleanup) {
+    activeModalCleanup();
+  } else {
+    const existing = document.querySelector('.xas-modal-backdrop');
+    if (existing) existing.remove();
+  }
 
   const backdrop = document.createElement('div');
-  backdrop.className = 'xas-modal-backdrop';
+  backdrop.className = isPageLightTheme()
+    ? 'xas-modal-backdrop xas-theme-light'
+    : 'xas-modal-backdrop';
 
   const modal = document.createElement('div');
   modal.className = 'xas-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'xas-settings-title');
+
+  const closeModal = () => {
+    window.removeEventListener('keydown', onKeyDown, true);
+    backdrop.remove();
+    if (activeModalCleanup === closeModal) activeModalCleanup = null;
+  };
+  activeModalCleanup = closeModal;
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      stopBubble(e);
+      closeModal();
+    }
+  };
 
   const head = document.createElement('div');
   head.className = 'xas-modal-head';
+
+  const headIcon = document.createElement('div');
+  headIcon.className = 'xas-m3-head-icon';
+  headIcon.appendChild(createIcon('tune', 20));
+
+  const headText = document.createElement('div');
+  headText.className = 'xas-m3-head-text';
   const heading = document.createElement('h3');
+  heading.id = 'xas-settings-title';
   heading.textContent = t('settingsHeading');
-  const closeX = makeIconButton({
-    icon: 'close',
-    title: t('lbClose'),
-    size: 18,
-    onClick: () => backdrop.remove(),
-  });
-  head.appendChild(heading);
+  const subtitle = document.createElement('div');
+  subtitle.className = 'xas-m3-head-subtitle';
+  subtitle.textContent = t('settingsSubtitle');
+  headText.appendChild(heading);
+  headText.appendChild(subtitle);
+
+  const closeX = document.createElement('button');
+  closeX.type = 'button';
+  closeX.className = 'xas-m3-icon-btn';
+  closeX.title = t('lbClose');
+  closeX.setAttribute('aria-label', t('lbClose'));
+  closeX.appendChild(createIcon('close', 20));
+  closeX.addEventListener('click', closeModal);
+
+  head.appendChild(headIcon);
+  head.appendChild(headText);
   head.appendChild(closeX);
 
   const body = document.createElement('div');
   body.className = 'xas-modal-body';
 
   const draft = { ...currentConfig };
+  const previewListeners = [];
 
-  const addToggle = (label, desc, key) => {
+  const createSection = (titleText) => {
+    const section = document.createElement('div');
+    section.className = 'xas-m3-section';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'xas-m3-section-title';
+    titleEl.textContent = titleText;
+    const card = document.createElement('div');
+    card.className = 'xas-m3-card';
+    section.appendChild(titleEl);
+    section.appendChild(card);
+    body.appendChild(section);
+    return card;
+  };
+
+  const addSwitchRow = (card, label, desc, key) => {
     const row = document.createElement('label');
-    row.className = 'xas-field';
-    const left = document.createElement('div');
+    row.className = 'xas-m3-row';
+
+    const copy = document.createElement('div');
+    copy.className = 'xas-m3-row-copy';
     const titleDiv = document.createElement('div');
+    titleDiv.className = 'xas-m3-row-title';
     titleDiv.textContent = label;
-    const descDiv = document.createElement('div');
-    descDiv.className = 'xas-field-desc';
-    descDiv.textContent = desc;
-    left.appendChild(titleDiv);
-    if (desc) left.appendChild(descDiv);
+    copy.appendChild(titleDiv);
+    if (desc) {
+      const descDiv = document.createElement('div');
+      descDiv.className = 'xas-m3-row-desc';
+      descDiv.textContent = desc;
+      copy.appendChild(descDiv);
+    }
+
+    const switchWrap = document.createElement('span');
+    switchWrap.className = 'xas-m3-switch';
 
     const input = document.createElement('input');
     input.type = 'checkbox';
-    input.className = 'xas-checkbox';
+    input.className = 'xas-m3-switch-input';
     input.checked = Boolean(draft[key]);
+    input.setAttribute('role', 'switch');
+    input.setAttribute('aria-checked', String(input.checked));
+
+    const track = document.createElement('span');
+    track.className = 'xas-m3-switch-track';
+    const thumb = document.createElement('span');
+    thumb.className = 'xas-m3-switch-thumb';
+    thumb.appendChild(createIcon('check', 14));
+    track.appendChild(thumb);
+
     input.addEventListener('change', () => {
       draft[key] = input.checked;
+      input.setAttribute('aria-checked', String(input.checked));
     });
 
-    row.appendChild(left);
-    row.appendChild(input);
-    body.appendChild(row);
+    switchWrap.appendChild(input);
+    switchWrap.appendChild(track);
+    row.appendChild(copy);
+    row.appendChild(switchWrap);
+    card.appendChild(row);
   };
 
-  const addSelect = (label, key, options) => {
-    const row = document.createElement('label');
-    row.className = 'xas-field';
-    const text = document.createElement('span');
-    text.textContent = label;
-    const select = document.createElement('select');
-    select.className = 'xas-select';
-    for (const opt of options) {
-      const o = document.createElement('option');
-      o.value = opt.value;
-      o.textContent = opt.label;
-      if (draft[key] === opt.value) o.selected = true;
-      select.appendChild(o);
+  const addSegmentedRow = (card, label, desc, key, options) => {
+    const row = document.createElement('div');
+    row.className = 'xas-m3-row-stack';
+
+    const copy = document.createElement('div');
+    copy.className = 'xas-m3-row-copy';
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'xas-m3-row-title';
+    titleDiv.textContent = label;
+    copy.appendChild(titleDiv);
+    if (desc) {
+      const descDiv = document.createElement('div');
+      descDiv.className = 'xas-m3-row-desc';
+      descDiv.textContent = desc;
+      copy.appendChild(descDiv);
     }
-    select.addEventListener('change', () => {
-      draft[key] = select.value;
-    });
-    row.appendChild(text);
-    row.appendChild(select);
-    body.appendChild(row);
+
+    const group = document.createElement('div');
+    group.className = 'xas-m3-segmented';
+    group.setAttribute('role', 'radiogroup');
+    group.setAttribute('aria-label', label);
+
+    const buttons = [];
+    const syncActive = () => {
+      for (const item of buttons) {
+        const isSelected = draft[key] === item.value;
+        item.btn.classList.toggle('xas-m3-seg-active', isSelected);
+        item.btn.setAttribute('aria-checked', String(isSelected));
+        item.checkEl.style.display = isSelected ? 'block' : 'none';
+      }
+    };
+
+    for (const opt of options) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'xas-m3-seg-btn';
+      btn.setAttribute('role', 'radio');
+
+      const checkEl = createIcon('check', 14);
+      const textSpan = document.createElement('span');
+      textSpan.textContent = opt.label;
+      btn.appendChild(checkEl);
+      btn.appendChild(textSpan);
+
+      btn.addEventListener('click', () => {
+        draft[key] = opt.value;
+        syncActive();
+        for (const listener of previewListeners) listener();
+      });
+
+      buttons.push({ btn, checkEl, value: opt.value });
+      group.appendChild(btn);
+    }
+
+    syncActive();
+    row.appendChild(copy);
+    row.appendChild(group);
+    card.appendChild(row);
   };
 
-  addToggle(t('optAutoDetect'), t('optAutoDetectDesc'), 'autoDetect');
-  addToggle(t('optAutoStitch'), t('optAutoStitchDesc'), 'autoStitch');
-  addToggle(t('optAutoUnshuffle'), t('optAutoUnshuffleDesc'), 'autoUnshuffle');
-  addSelect(t('optSensitivity'), 'sensitivity', [
+  const addTextFieldRow = (card, label, desc, key, previewFormatter) => {
+    const row = document.createElement('label');
+    row.className = 'xas-m3-row-stack';
+
+    const copy = document.createElement('div');
+    copy.className = 'xas-m3-row-copy';
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'xas-m3-row-title';
+    titleDiv.textContent = label;
+    copy.appendChild(titleDiv);
+    if (desc) {
+      const descDiv = document.createElement('div');
+      descDiv.className = 'xas-m3-row-desc';
+      descDiv.textContent = desc;
+      copy.appendChild(descDiv);
+    }
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'xas-m3-textfield';
+    input.value = draft[key] || '';
+
+    const previewEl = document.createElement('div');
+    previewEl.className = 'xas-m3-preview-line';
+    const updatePreview = () => {
+      if (previewFormatter) {
+        previewEl.textContent = previewFormatter(draft);
+      }
+    };
+    updatePreview();
+    previewListeners.push(updatePreview);
+
+    input.addEventListener('input', () => {
+      draft[key] = input.value;
+      updatePreview();
+    });
+
+    row.appendChild(copy);
+    row.appendChild(input);
+    if (previewFormatter) row.appendChild(previewEl);
+    card.appendChild(row);
+  };
+
+  const stitchingCard = createSection(t('sectionStitching'));
+  addSwitchRow(stitchingCard, t('optAutoDetect'), t('optAutoDetectDesc'), 'autoDetect');
+  addSwitchRow(stitchingCard, t('optAutoStitch'), t('optAutoStitchDesc'), 'autoStitch');
+  addSwitchRow(stitchingCard, t('optAutoUnshuffle'), t('optAutoUnshuffleDesc'), 'autoUnshuffle');
+  addSegmentedRow(stitchingCard, t('optSensitivity'), t('optSensitivityDesc'), 'sensitivity', [
     { value: 'strict', label: t('sensStrict') },
     { value: 'normal', label: t('sensNormal') },
     { value: 'loose', label: t('sensLoose') },
   ]);
-  addSelect(t('optFormat'), 'downloadFormat', [
-    { value: 'png', label: 'PNG (Lossless)' },
+
+  const gifCard = createSection(t('sectionGifVideo'));
+  addSwitchRow(gifCard, t('optEnableGifTools'), t('optEnableGifToolsDesc'), 'enableGifTools');
+  addSwitchRow(
+    gifCard,
+    t('optAutoDetectGifVideos'),
+    t('optAutoDetectGifVideosDesc'),
+    'autoDetectGifVideos',
+  );
+  addSwitchRow(
+    gifCard,
+    t('optShowOnRegularVideos'),
+    t('optShowOnRegularVideosDesc'),
+    'showOnRegularVideos',
+  );
+  addSegmentedRow(gifCard, t('optGifFps'), t('optGifFpsDesc'), 'gifFps', [
+    { value: 10, label: '10 fps' },
+    { value: 15, label: '15 fps' },
+    { value: 20, label: '20 fps' },
+    { value: 25, label: '25 fps' },
+  ]);
+  addSegmentedRow(gifCard, t('optGifMaxWidth'), t('optGifMaxWidthDesc'), 'gifMaxWidth', [
+    { value: 480, label: '480px' },
+    { value: 540, label: '540px' },
+    { value: 720, label: '720px' },
+    { value: 0, label: t('optWidthOrig') },
+  ]);
+  addSegmentedRow(gifCard, t('optGifQuality'), t('optGifQualityDesc'), 'gifQuality', [
+    { value: 'fast', label: t('qualFast') },
+    { value: 'balanced', label: t('qualBalanced') },
+    { value: 'high', label: t('qualHigh') },
+  ]);
+  addSegmentedRow(gifCard, t('optGifMaxDuration'), t('optGifMaxDurationDesc'), 'gifMaxDuration', [
+    { value: 8, label: '8s' },
+    { value: 15, label: '15s' },
+    { value: 25, label: '25s' },
+  ]);
+
+  const outputCard = createSection(t('sectionOutput'));
+  addSegmentedRow(outputCard, t('optFormat'), t('optFormatDesc'), 'downloadFormat', [
+    { value: 'png', label: 'PNG' },
     { value: 'jpeg', label: 'JPEG (95%)' },
     { value: 'webp', label: 'WebP (95%)' },
   ]);
-
-  const tplWrap = document.createElement('label');
-  tplWrap.className = 'xas-field-col';
-  const tplLabel = document.createElement('span');
-  tplLabel.textContent = t('optTemplate');
-  const tplInput = document.createElement('input');
-  tplInput.type = 'text';
-  tplInput.className = 'xas-input';
-  tplInput.value = draft.filenameTemplate;
-  tplInput.addEventListener('input', () => {
-    draft.filenameTemplate = tplInput.value;
-  });
-  const tplDesc = document.createElement('span');
-  tplDesc.className = 'xas-field-desc';
-  tplDesc.textContent = t('optTemplateDesc');
-  tplWrap.appendChild(tplLabel);
-  tplWrap.appendChild(tplInput);
-  tplWrap.appendChild(tplDesc);
-  body.appendChild(tplWrap);
-
-  addToggle(t('optDebug'), '', 'debug');
+  addTextFieldRow(
+    outputCard,
+    t('optTemplate'),
+    t('optTemplateDesc'),
+    'filenameTemplate',
+    (d) =>
+      `${t('previewPrefix')}${formatFilename(d.filenameTemplate, {
+        handle: 'artist',
+        tweetId: '189000123',
+        layout: '2x2',
+        ext: d.downloadFormat || 'png',
+      })}`,
+  );
+  addSwitchRow(outputCard, t('optDebug'), t('optDebugDesc'), 'debug');
 
   const foot = document.createElement('div');
   foot.className = 'xas-modal-foot';
+
   const cancelBtn = document.createElement('button');
   cancelBtn.type = 'button';
-  cancelBtn.className = 'xas-lb-btn';
+  cancelBtn.className = 'xas-m3-text-btn';
   cancelBtn.textContent = t('cancel');
-  cancelBtn.addEventListener('click', () => backdrop.remove());
+  cancelBtn.addEventListener('click', closeModal);
 
   const saveBtn = document.createElement('button');
   saveBtn.type = 'button';
-  saveBtn.className = 'xas-lb-btn xas-lb-primary';
-  saveBtn.textContent = t('save');
+  saveBtn.className = 'xas-m3-filled-btn';
+  saveBtn.appendChild(createIcon('check', 16));
+  const saveLabel = document.createElement('span');
+  saveLabel.textContent = t('save');
+  saveBtn.appendChild(saveLabel);
   saveBtn.addEventListener('click', () => {
     onSave(draft);
-    backdrop.remove();
+    closeModal();
   });
 
   foot.appendChild(cancelBtn);
@@ -574,9 +852,10 @@ export function openSettingsModal(currentConfig, onSave) {
   backdrop.appendChild(modal);
 
   backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) backdrop.remove();
+    if (e.target === backdrop) closeModal();
   });
 
+  window.addEventListener('keydown', onKeyDown, true);
   document.body.appendChild(backdrop);
 }
 
@@ -1043,6 +1322,249 @@ export function createGalleryUI(gallery, callbacks) {
     destroy() {
       container.classList.remove('xas-active', 'xas-root');
       stage.remove();
+      toolbar.remove();
+    },
+  };
+}
+
+function formatVideoProgressText(info) {
+  if (!info) return '';
+  if (info.stage === 'fetch') return t('stageFetch');
+  const pct =
+    typeof info.progress === 'number' ? `${Math.round(info.progress * 100)}%` : '';
+  if (info.stage === 'extract') {
+    return `${t('stageExtract')} ${pct}`.trim();
+  }
+  if (info.stage === 'encode') {
+    return `${t('stageEncode')} ${pct}`.trim();
+  }
+  return pct || t('stageFetch');
+}
+
+/**
+ * Manage the floating GIF / MP4 export toolbar overlaid on an X GIF or video player.
+ */
+export function createVideoUI(videoTarget, callbacks) {
+  const { container } = videoTarget;
+  container.classList.add('xas-video-root');
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'xas-injected xas-video-toolbar';
+
+  for (const evtName of ['click', 'pointerdown', 'mousedown', 'touchstart']) {
+    toolbar.addEventListener(evtName, (e) => {
+      if (evtName === 'click') {
+        stopBubble(e);
+      } else {
+        e.stopPropagation();
+      }
+    });
+  }
+
+  container.appendChild(toolbar);
+
+  const state = {
+    classification: videoTarget.classification || 'video',
+    expanded: false,
+    visible: videoTarget.visible !== false,
+    busy: null, // null | { stage, progress, frame, total }
+  };
+
+  let progressLabelEl = null;
+  let progressBarEl = null;
+
+  const updateProgressDom = () => {
+    if (!state.busy || !progressLabelEl || !progressBarEl) return;
+    progressLabelEl.textContent = formatVideoProgressText(state.busy);
+    if (typeof state.busy.progress === 'number') {
+      progressBarEl.classList.remove('xas-m3-progress-indeterminate');
+      const pct = Math.max(0, Math.min(100, Math.round(state.busy.progress * 100)));
+      progressBarEl.style.width = `${pct}%`;
+    } else {
+      progressBarEl.classList.add('xas-m3-progress-indeterminate');
+      progressBarEl.style.width = '';
+    }
+  };
+
+  const render = () => {
+    toolbar.style.display = state.visible ? 'flex' : 'none';
+    if (!state.visible) return;
+
+    progressLabelEl = null;
+    progressBarEl = null;
+    toolbar.textContent = '';
+    toolbar.classList.toggle(
+      'xas-expanded',
+      Boolean(state.busy) || state.expanded || state.classification !== 'video',
+    );
+
+    const pill = document.createElement('div');
+
+    if (state.busy) {
+      pill.className = 'xas-pill xas-progress-pill';
+
+      const row = document.createElement('div');
+      row.className = 'xas-progress-row';
+
+      const spinner = document.createElement('span');
+      spinner.className = 'xas-spinner';
+
+      progressLabelEl = document.createElement('span');
+      progressLabelEl.className = 'xas-progress-label';
+
+      const cancelBtn = makeIconButton({
+        icon: 'stop',
+        title: t('cancelGifTitle'),
+        size: 14,
+        onClick: () => callbacks.onCancel?.(),
+      });
+
+      row.appendChild(spinner);
+      row.appendChild(progressLabelEl);
+      row.appendChild(cancelBtn);
+
+      const track = document.createElement('div');
+      track.className = 'xas-m3-progress-track';
+      progressBarEl = document.createElement('div');
+      progressBarEl.className = 'xas-m3-progress-bar';
+      track.appendChild(progressBarEl);
+
+      pill.appendChild(row);
+      pill.appendChild(track);
+      toolbar.appendChild(pill);
+      updateProgressDom();
+      return;
+    }
+
+    if (state.classification === 'native_gif' || state.classification === 'gif_like_video') {
+      pill.className = 'xas-pill xas-suggested';
+
+      const gifBtn = document.createElement('button');
+      gifBtn.type = 'button';
+      gifBtn.className = 'xas-btn xas-btn-accent';
+      const isGifLike = state.classification === 'gif_like_video';
+      gifBtn.title = isGifLike ? t('saveGifLikeTitle') : t('saveGifTitle');
+      appendIconLabel(gifBtn, isGifLike ? 'auto_awesome' : 'gif_box', t('gifLabel'), 15);
+      gifBtn.addEventListener('click', (e) => {
+        stopBubble(e);
+        callbacks.onExportGif?.();
+      });
+
+      const sep = document.createElement('span');
+      sep.className = 'xas-sep';
+
+      const mp4Btn = document.createElement('button');
+      mp4Btn.type = 'button';
+      mp4Btn.className = 'xas-btn';
+      mp4Btn.title = t('downloadMp4Title');
+      mp4Btn.textContent = t('mp4Label');
+      mp4Btn.addEventListener('click', (e) => {
+        stopBubble(e);
+        callbacks.onDownloadMp4?.();
+      });
+
+      pill.appendChild(gifBtn);
+      pill.appendChild(sep);
+      pill.appendChild(mp4Btn);
+      pill.appendChild(
+        makeIconButton({
+          icon: 'settings',
+          title: t('settingsTitle'),
+          size: 15,
+          onClick: () => callbacks.onOpenSettings?.(),
+        }),
+      );
+      toolbar.appendChild(pill);
+      return;
+    }
+
+    if (!state.expanded) {
+      pill.className = 'xas-pill xas-collapsed';
+      const trigger = document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'xas-btn';
+      trigger.title = t('expandVideoToolsTitle');
+      appendIconLabel(trigger, 'gif_box', t('gifLabel'), 15);
+      trigger.addEventListener('click', (e) => {
+        stopBubble(e);
+        state.expanded = true;
+        render();
+      });
+      pill.appendChild(trigger);
+      toolbar.appendChild(pill);
+      return;
+    }
+
+    pill.className = 'xas-pill';
+    const exportBtn = document.createElement('button');
+    exportBtn.type = 'button';
+    exportBtn.className = 'xas-btn xas-btn-accent';
+    exportBtn.title = t('saveGifTitle');
+    appendIconLabel(exportBtn, 'gif_box', t('exportGifLabel'), 15);
+    exportBtn.addEventListener('click', (e) => {
+      stopBubble(e);
+      callbacks.onExportGif?.();
+    });
+
+    const mp4Btn = document.createElement('button');
+    mp4Btn.type = 'button';
+    mp4Btn.className = 'xas-btn';
+    mp4Btn.title = t('downloadMp4Title');
+    appendIconLabel(mp4Btn, 'movie', t('mp4Label'), 15);
+    mp4Btn.addEventListener('click', (e) => {
+      stopBubble(e);
+      callbacks.onDownloadMp4?.();
+    });
+
+    pill.appendChild(exportBtn);
+    pill.appendChild(mp4Btn);
+    pill.appendChild(
+      makeIconButton({
+        icon: 'settings',
+        title: t('settingsTitle'),
+        size: 15,
+        onClick: () => callbacks.onOpenSettings?.(),
+      }),
+    );
+    pill.appendChild(
+      makeIconButton({
+        icon: 'close',
+        title: t('collapseVideoToolsTitle'),
+        size: 15,
+        onClick: () => {
+          state.expanded = false;
+          render();
+        },
+      }),
+    );
+    toolbar.appendChild(pill);
+  };
+
+  render();
+
+  return {
+    setClassification(kind) {
+      if (state.classification === kind) return;
+      state.classification = kind;
+      render();
+    },
+    setProgress(info) {
+      if (info && state.busy && progressLabelEl && progressBarEl) {
+        state.busy = info;
+        updateProgressDom();
+        return;
+      }
+      state.busy = info || null;
+      render();
+    },
+    setVisible(visible) {
+      const next = Boolean(visible);
+      if (state.visible === next) return;
+      state.visible = next;
+      render();
+    },
+    destroy() {
+      container.classList.remove('xas-video-root');
       toolbar.remove();
     },
   };

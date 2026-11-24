@@ -3,8 +3,8 @@
 // @name:zh-CN        X 画师拼图自动还原
 // @namespace         https://github.com/anfsity/x-art-stitcher
 // @version           1.0.0
-// @description       Automatically detect, unshuffle, and stitch multi-image artist artworks on X (Twitter), including 2x2 grids and 20-image carousels, with fullscreen lightbox, lossless download, and clipboard copy.
-// @description:zh-CN 自动识别并拼合 X (Twitter) 上画师发布的多图/四宫格/长图/多图轮播及防 AI 乱序切片作品，支持高清灯箱预览、原图下载与一键复制。
+// @description       Automatically detect, unshuffle, and stitch multi-image artist artworks on X (Twitter), plus recognize GIFs and short silent videos for instant MP4-to-GIF / MP4 export with fullscreen lightbox, lossless download, and clipboard copy.
+// @description:zh-CN 自动识别并拼合 X (Twitter) 上画师发布的多图/四宫格/长图/多图轮播及防 AI 乱序切片作品，并自动识别 GIF 与类 GIF 短视频，支持浏览器端无损转存 GIF / 下载 MP4 原视频与全屏高清灯箱预览。
 // @author            anfsity
 // @license           Apache-2.0
 // @icon              data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0iIzFkOWJmMCIvPjxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDQgNCkiPjxwYXRoIGZpbGw9IiNmZmYiIGQ9Ik0zIDN2OGg4VjNIM3ptNiA2SDVWNWg0djR6TTMgMTN2OGg4di04SDN6bTYgNkg1di00aDR2NHpNMTMgM3Y4aDhWM2gtOHptNiA2aC00VjVoNHY0ek0xMyAxM3Y4aDh2LThoLTh6bTYgNmgtNHYtNGg0djR6Ii8+PC9nPjwvc3ZnPg==
@@ -17,6 +17,7 @@
 // @match             https://mobile.x.com/*
 // @match             https://mobile.twitter.com/*
 // @connect           pbs.twimg.com
+// @connect           video.twimg.com
 // @grant             GM_xmlhttpRequest
 // @grant             GM_addStyle
 // @grant             GM_getValue
@@ -38,6 +39,13 @@
     downloadFormat: 'png', // 'png' | 'jpeg' | 'webp'
     downloadQuality: 0.95,
     filenameTemplate: '@{handle}_{tweetId}_{layout}',
+    enableGifTools: true,
+    autoDetectGifVideos: true,
+    showOnRegularVideos: true,
+    gifFps: 15, // 10 | 15 | 20 | 25
+    gifMaxWidth: 540, // 480 | 540 | 720 | 0 (original)
+    gifQuality: 'balanced', // 'fast' | 'balanced' | 'high'
+    gifMaxDuration: 15, // 8 | 15 | 25 (seconds)
     debug: false,
   };
 
@@ -103,6 +111,8 @@
       const match = responseHeaders.match(/^content-type:\s*([^;\r\n]+)/im);
       if (match) return match[1].trim().toLowerCase();
     }
+    if (/format=mp4|\.mp4(?:$|[?:])/i.test(fallbackUrl)) return 'video/mp4';
+    if (/format=gif|\.gif(?:$|[?:])/i.test(fallbackUrl)) return 'image/gif';
     if (/format=png|\.png(?:$|[?:])/i.test(fallbackUrl)) return 'image/png';
     if (/format=webp|\.webp(?:$|[?:])/i.test(fallbackUrl)) return 'image/webp';
     return 'image/jpeg';
@@ -163,6 +173,51 @@
       }
     }
     throw lastError || new Error('Failed to fetch image');
+  }
+
+  function fetchRangeBuffer(url, startByte = 0, endByte = 65535) {
+    const rangeHeader = `bytes=${startByte}-${endByte}`;
+    return new Promise((resolve, reject) => {
+      const gmRequest =
+        typeof GM_xmlhttpRequest === 'function'
+          ? GM_xmlhttpRequest
+          : typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
+            ? GM.xmlHttpRequest
+            : null;
+
+      if (!gmRequest) {
+        fetch(url, { mode: 'cors', headers: { Range: rangeHeader } })
+          .then(async (res) => {
+            if (res.status !== 200 && res.status !== 206) {
+              throw new Error(`HTTP ${res.status}`);
+            }
+            resolve(await res.arrayBuffer());
+          })
+          .catch(reject);
+        return;
+      }
+
+      gmRequest({
+        method: 'GET',
+        url,
+        headers: { Range: rangeHeader },
+        responseType: 'arraybuffer',
+        timeout: 10000,
+        onload(res) {
+          if ((res.status === 200 || res.status === 206) && res.response) {
+            resolve(res.response);
+          } else {
+            reject(new Error(`HTTP ${res.status} for range ${url}`));
+          }
+        },
+        onerror(err) {
+          reject(new Error(`Network error for ${url}: ${err?.error || 'unknown'}`));
+        },
+        ontimeout() {
+          reject(new Error(`Timeout fetching range ${url}`));
+        },
+      });
+    });
   }
 
   async function decodeImage(blob) {
@@ -297,6 +352,48 @@
     }
   }
 
+  function isTweetVideoUrl(src) {
+    if (!src || typeof src !== 'string') return false;
+    try {
+      const u = new URL(src);
+      return (
+        u.hostname === 'video.twimg.com' ||
+        (u.hostname.endsWith('.twimg.com') && u.pathname.includes('video'))
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function extractVideoMediaKey(src) {
+    if (!src || typeof src !== 'string') return null;
+    try {
+      const u = new URL(src);
+      const tweetVideoMatch = u.pathname.match(/\/tweet_video(?:_thumb)?\/([^/.?]+)/i);
+      if (tweetVideoMatch) return `tweet_video:${tweetVideoMatch[1]}`;
+
+      const extMatch = u.pathname.match(/\/ext_tw_video(?:_thumb)?\/(\d+)\//i);
+      if (extMatch) return `ext_tw_video:${extMatch[1]}`;
+
+      const ampMatch = u.pathname.match(/\/amplify_video(?:_thumb)?\/(\d+)\//i);
+      if (ampMatch) return `amplify_video:${ampMatch[1]}`;
+
+      if (u.hostname === 'video.twimg.com') {
+        return u.pathname.replace(/\.[a-z0-9]+$/i, '');
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseVariantDimensions(url) {
+    if (!url || typeof url !== 'string') return { width: 0, height: 0 };
+    const match = url.match(/\/(\d{2,4})x(\d{2,4})\//);
+    if (!match) return { width: 0, height: 0 };
+    return { width: Number(match[1]), height: Number(match[2]) };
+  }
+
   function buildMediaUrl(src, targetName) {
     const u = new URL(src);
     const legacyMatch = u.pathname.match(/^(\/media\/[^/.:]+)\.(jpg|jpeg|png|webp)(?::[a-z0-9_]+)?$/i);
@@ -354,30 +451,1284 @@
     return `${base}.${cleanExt}`;
   }
 
+  // --- mp4.js ---
+  const MAX_STTS_SAMPLES = 6000;
+
+  function readFourCC(view, offset) {
+    return String.fromCharCode(
+      view.getUint8(offset),
+      view.getUint8(offset + 1),
+      view.getUint8(offset + 2),
+      view.getUint8(offset + 3),
+    );
+  }
+
+  function readUint64(view, offset) {
+    const hi = view.getUint32(offset, false);
+    const lo = view.getUint32(offset + 4, false);
+    return hi * 4294967296 + lo;
+  }
+
+  function iterBoxes(view, start, end, onBox) {
+    let offset = start;
+    while (offset + 8 <= end) {
+      const size32 = view.getUint32(offset, false);
+      const type = readFourCC(view, offset + 4);
+      let headerSize = 8;
+      let boxSize = size32;
+
+      if (size32 === 1) {
+        if (offset + 16 > end) {
+          onBox({ type, start: offset, headerSize: 16, boxEnd: end, truncated: true });
+          break;
+        }
+        boxSize = readUint64(view, offset + 8);
+        headerSize = 16;
+      } else if (size32 === 0) {
+        boxSize = end - offset;
+      }
+
+      if (!Number.isFinite(boxSize) || boxSize < headerSize) break;
+      const rawEnd = offset + boxSize;
+      const truncated = rawEnd > end;
+      const boxEnd = truncated ? end : rawEnd;
+
+      onBox({ type, start: offset, headerSize, boxEnd, truncated });
+      if (truncated || boxEnd <= offset) break;
+      offset = boxEnd;
+    }
+  }
+
+  function parseTrackBox(view, trakStart, trakEnd) {
+    const track = {
+      handlerType: '',
+      timescale: 0,
+      mdhdDuration: 0,
+      width: 0,
+      height: 0,
+      totalSamples: 0,
+      totalDtsTicks: 0,
+      dtsTicks: [],
+      cttsOffsets: [],
+    };
+
+    const walkStbl = (stblStart, stblEnd) => {
+      iterBoxes(view, stblStart, stblEnd, ({ type, start, headerSize, boxEnd }) => {
+        const payload = start + headerSize;
+        if (type === 'stts' && payload + 8 <= boxEnd) {
+          const entryCount = view.getUint32(payload + 4, false);
+          let pos = payload + 8;
+          for (let i = 0; i < entryCount && pos + 8 <= boxEnd; i++, pos += 8) {
+            const sampleCount = view.getUint32(pos, false);
+            const sampleDelta = view.getUint32(pos + 4, false);
+            track.totalSamples += sampleCount;
+            const remaining = MAX_STTS_SAMPLES - track.dtsTicks.length;
+            const expandCount = Math.min(sampleCount, remaining);
+            for (let s = 0; s < expandCount; s++) {
+              track.dtsTicks.push(track.totalDtsTicks);
+              track.totalDtsTicks += sampleDelta;
+            }
+            if (sampleCount > expandCount) {
+              track.totalDtsTicks += (sampleCount - expandCount) * sampleDelta;
+            }
+          }
+        } else if (type === 'ctts' && payload + 8 <= boxEnd) {
+          const version = view.getUint8(payload);
+          const entryCount = view.getUint32(payload + 4, false);
+          let pos = payload + 8;
+          for (let i = 0; i < entryCount && pos + 8 <= boxEnd; i++, pos += 8) {
+            const sampleCount = view.getUint32(pos, false);
+            const sampleOffset =
+              version === 0 ? view.getUint32(pos + 4, false) : view.getInt32(pos + 4, false);
+            const remaining = MAX_STTS_SAMPLES - track.cttsOffsets.length;
+            const expandCount = Math.min(sampleCount, remaining);
+            for (let s = 0; s < expandCount; s++) {
+              track.cttsOffsets.push(sampleOffset);
+            }
+            if (track.cttsOffsets.length >= MAX_STTS_SAMPLES) break;
+          }
+        }
+      });
+    };
+
+    const walkMinf = (minfStart, minfEnd) => {
+      iterBoxes(view, minfStart, minfEnd, ({ type, start, headerSize, boxEnd }) => {
+        if (type === 'stbl') walkStbl(start + headerSize, boxEnd);
+      });
+    };
+
+    const walkMdia = (mdiaStart, mdiaEnd) => {
+      iterBoxes(view, mdiaStart, mdiaEnd, ({ type, start, headerSize, boxEnd }) => {
+        const payload = start + headerSize;
+        if (type === 'mdhd' && payload + 20 <= boxEnd) {
+          const version = view.getUint8(payload);
+          if (version === 0) {
+            track.timescale = view.getUint32(payload + 12, false);
+            track.mdhdDuration = view.getUint32(payload + 16, false);
+          } else if (version === 1 && payload + 32 <= boxEnd) {
+            track.timescale = view.getUint32(payload + 20, false);
+            track.mdhdDuration = readUint64(view, payload + 24);
+          }
+        } else if (type === 'hdlr' && payload + 12 <= boxEnd) {
+          track.handlerType = readFourCC(view, payload + 8);
+        } else if (type === 'minf') {
+          walkMinf(payload, boxEnd);
+        }
+      });
+    };
+
+    iterBoxes(view, trakStart, trakEnd, ({ type, start, headerSize, boxEnd }) => {
+      const payload = start + headerSize;
+      if (type === 'tkhd' && payload + 84 <= boxEnd) {
+        const version = view.getUint8(payload);
+        if (version === 0) {
+          track.width = view.getUint32(payload + 76, false) / 65536;
+          track.height = view.getUint32(payload + 80, false) / 65536;
+        } else if (version === 1 && payload + 96 <= boxEnd) {
+          track.width = view.getUint32(payload + 88, false) / 65536;
+          track.height = view.getUint32(payload + 92, false) / 65536;
+        }
+      } else if (type === 'mdia') {
+        walkMdia(payload, boxEnd);
+      }
+    });
+
+    return track;
+  }
+
+  /**
+   * Inspect ISO-BMFF (MP4) header boxes using zero external dependencies.
+   * Gracefully detects truncated `moov` atoms in partial HTTP Range responses.
+   */
+  function parseMp4Metadata(buffer) {
+    const bytes =
+      buffer instanceof Uint8Array
+        ? buffer
+        : ArrayBuffer.isView(buffer)
+          ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+          : new Uint8Array(buffer || 0);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    let hasMoov = false;
+    let complete = false;
+    let hasAudio = false;
+    let hasVideo = false;
+    let primaryVideo = null;
+
+    iterBoxes(view, 0, bytes.byteLength, ({ type, start, headerSize, boxEnd, truncated }) => {
+      if (type !== 'moov') return;
+      hasMoov = true;
+      complete = !truncated;
+      if (!complete) return;
+
+      iterBoxes(view, start + headerSize, boxEnd, (child) => {
+        if (child.type !== 'trak' || child.truncated) return;
+        const track = parseTrackBox(view, child.start + child.headerSize, child.boxEnd);
+        if (track.handlerType === 'soun') {
+          hasAudio = true;
+        } else if (track.handlerType === 'vide') {
+          hasVideo = true;
+          if (!primaryVideo || (track.totalSamples > 0 && primaryVideo.totalSamples === 0)) {
+            primaryVideo = track;
+          }
+        }
+      });
+    });
+
+    if (!primaryVideo) {
+      return {
+        hasMoov,
+        complete,
+        hasAudio,
+        hasVideo,
+        durationSec: 0,
+        width: 0,
+        height: 0,
+        frameCount: 0,
+        avgFps: 0,
+        frameTimestamps: [],
+      };
+    }
+
+    const timescale = primaryVideo.timescale || 0;
+    let durationSec = 0;
+    if (timescale > 0) {
+      if (primaryVideo.mdhdDuration > 0) {
+        durationSec = primaryVideo.mdhdDuration / timescale;
+      } else if (primaryVideo.totalDtsTicks > 0) {
+        durationSec = primaryVideo.totalDtsTicks / timescale;
+      }
+    }
+
+    const frameTimestamps = [];
+    if (timescale > 0 && primaryVideo.dtsTicks.length > 0) {
+      const ptsTicks = primaryVideo.dtsTicks.map((dts, i) => {
+        const offset = i < primaryVideo.cttsOffsets.length ? primaryVideo.cttsOffsets[i] : 0;
+        return dts + offset;
+      });
+      ptsTicks.sort((a, b) => a - b);
+      const baseTick = ptsTicks[0];
+      for (let i = 0; i < ptsTicks.length; i++) {
+        frameTimestamps.push((ptsTicks[i] - baseTick) / timescale);
+      }
+    }
+
+    const frameCount = primaryVideo.totalSamples || frameTimestamps.length;
+    let avgFps = 0;
+    if (durationSec > 0 && frameCount > 0) {
+      avgFps = frameCount / durationSec;
+    } else if (frameTimestamps.length >= 2) {
+      const span = frameTimestamps[frameTimestamps.length - 1] - frameTimestamps[0];
+      if (span > 0) avgFps = (frameTimestamps.length - 1) / span;
+    }
+
+    return {
+      hasMoov,
+      complete,
+      hasAudio,
+      hasVideo,
+      durationSec,
+      width: Math.round(primaryVideo.width),
+      height: Math.round(primaryVideo.height),
+      frameCount,
+      avgFps,
+      frameTimestamps,
+    };
+  }
+
+  /**
+   * Plan deterministic video seek timestamps and GIF centisecond frame delays.
+   * Preserves native cadence for low-FPS GIFs and snaps downsampled timestamps to
+   * real frame presentation times to eliminate judder.
+   */
+  function planFrameSchedule(
+    mp4Meta,
+    fallbackDurationSec,
+    { targetFps = 15, maxDurationSec = 15, maxFrames = 240 } = {},
+  ) {
+    const safeFps = Math.max(1, Number(targetFps) || 15);
+    const safeMaxDuration = Math.max(0.1, Number(maxDurationSec) || 15);
+    const safeMaxFrames = Math.max(1, Number(maxFrames) || 240);
+
+    let totalDuration =
+      Number.isFinite(fallbackDurationSec) && fallbackDurationSec > 0
+        ? fallbackDurationSec
+        : mp4Meta?.durationSec || 0;
+
+    const nativePts = Array.isArray(mp4Meta?.frameTimestamps) ? mp4Meta.frameTimestamps : [];
+    if (totalDuration <= 0 && nativePts.length >= 2) {
+      const stepEst =
+        (nativePts[nativePts.length - 1] - nativePts[0]) / Math.max(1, nativePts.length - 1);
+      totalDuration = nativePts[nativePts.length - 1] + stepEst;
+    }
+    if (totalDuration <= 0) totalDuration = 1 / safeFps;
+
+    const effectiveDuration = Math.min(totalDuration, safeMaxDuration);
+    const truncated = totalDuration > safeMaxDuration + 0.15;
+
+    let timestamps = [];
+    if (nativePts.length >= 2) {
+      const filtered = nativePts.filter((t) => t < effectiveDuration - 0.001);
+      if (filtered.length === 0) filtered.push(nativePts[0]);
+
+      const nativeFps =
+        mp4Meta.avgFps > 0
+          ? mp4Meta.avgFps
+          : filtered.length / Math.max(0.01, effectiveDuration);
+
+      if (nativeFps <= safeFps * 1.15 && filtered.length <= safeMaxFrames) {
+        timestamps = filtered;
+      } else {
+        const targetStep = 1 / safeFps;
+        let cursor = 0;
+        let lastPickedIdx = -1;
+        for (let k = 0; k < safeMaxFrames; k++) {
+          const idealT = k * targetStep;
+          if (idealT >= effectiveDuration - 0.001 && k > 0) break;
+
+          while (cursor + 1 < filtered.length && filtered[cursor + 1] <= idealT) {
+            cursor++;
+          }
+          let bestIdx = cursor;
+          if (
+            cursor + 1 < filtered.length &&
+            Math.abs(filtered[cursor + 1] - idealT) < Math.abs(filtered[cursor] - idealT)
+          ) {
+            bestIdx = cursor + 1;
+          }
+          if (bestIdx > lastPickedIdx) {
+            timestamps.push(filtered[bestIdx]);
+            lastPickedIdx = bestIdx;
+          }
+        }
+        if (timestamps.length === 0) {
+          timestamps.push(filtered[0]);
+        }
+      }
+    } else {
+      const step = 1 / safeFps;
+      for (let k = 0; k < safeMaxFrames; k++) {
+        const t = k * step;
+        if (t >= effectiveDuration - 0.001 && k > 0) break;
+        timestamps.push(t);
+      }
+      if (timestamps.length === 0) timestamps.push(0);
+    }
+
+    const diffs = [];
+    for (let i = 0; i + 1 < timestamps.length; i++) {
+      diffs.push(Math.max(0.02, timestamps[i + 1] - timestamps[i]));
+    }
+    const sortedDiffs = diffs.slice().sort((a, b) => a - b);
+    const medianStep =
+      sortedDiffs.length > 0 ? sortedDiffs[Math.floor(sortedDiffs.length / 2)] : 1 / safeFps;
+
+    const delaysCs = new Array(timestamps.length);
+    for (let i = 0; i < timestamps.length; i++) {
+      let dt;
+      if (i + 1 < timestamps.length) {
+        dt = timestamps[i + 1] - timestamps[i];
+      } else {
+        const tail = effectiveDuration - timestamps[i];
+        dt = tail >= medianStep * 0.5 && tail <= medianStep * 2 ? tail : medianStep;
+      }
+      delaysCs[i] = Math.max(2, Math.min(65535, Math.round(dt * 100)));
+    }
+
+    return {
+      timestamps,
+      delaysCs,
+      effectiveDuration,
+      truncated,
+    };
+  }
+
+  /**
+   * Classify an X video entry into:
+   * - 'native_gif': X's own animated_gif / tweet_video posts
+   * - 'gif_like_video': Short silent MP4 clips verified via ISO-BMFF probe
+   * - 'video': Regular video with audio or longer duration
+   */
+  function classifyGifMedia({
+    type,
+    mp4Url,
+    posterUrl,
+    hasGifBadge,
+    durationMs,
+    mp4Probe,
+    maxAutoDurationSec = 12,
+  }) {
+    if (
+      type === 'animated_gif' ||
+      hasGifBadge ||
+      (typeof mp4Url === 'string' && /\/tweet_video\//i.test(mp4Url)) ||
+      (typeof posterUrl === 'string' && /\/tweet_video_thumb\//i.test(posterUrl))
+    ) {
+      return 'native_gif';
+    }
+
+    if (mp4Probe?.complete && mp4Probe.hasVideo && !mp4Probe.hasAudio) {
+      const durationSec =
+        mp4Probe.durationSec > 0
+          ? mp4Probe.durationSec
+          : Number.isFinite(durationMs) && durationMs > 0
+            ? durationMs / 1000
+            : 0;
+      if (durationSec > 0 && durationSec <= maxAutoDurationSec) {
+        return 'gif_like_video';
+      }
+    }
+
+    return 'video';
+  }
+
+  // --- gif.js ---
+  const GIF_TRANSPARENT_IDX = 255;
+  const GIF_MAX_PALETTE_COLORS = 255;
+  const LZW_HASH_SIZE = 5003;
+
+  const BAYER_4X4 = [
+    -7.5, 0.5, -5.5, 2.5,
+    4.5, -3.5, 6.5, -1.5,
+    -4.5, 3.5, -6.5, 1.5,
+    7.5, -0.5, 5.5, -2.5,
+  ];
+
+  function buildMedianCutPalette(samples, maxColors = GIF_MAX_PALETTE_COLORS) {
+    const counts = new Uint32Array(32768);
+    const sumR = new Float64Array(32768);
+    const sumG = new Float64Array(32768);
+    const sumB = new Float64Array(32768);
+
+    const sampleCount = Math.floor(samples.length / 3);
+    for (let i = 0; i < sampleCount; i++) {
+      const base = i * 3;
+      const r = samples[base];
+      const g = samples[base + 1];
+      const b = samples[base + 2];
+      const bin = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+      counts[bin]++;
+      sumR[bin] += r;
+      sumG[bin] += g;
+      sumB[bin] += b;
+    }
+
+    const activeBins = [];
+    for (let bin = 0; bin < 32768; bin++) {
+      if (counts[bin] > 0) activeBins.push(bin);
+    }
+
+    const palette = new Uint8Array(256 * 3);
+    const lut = new Int16Array(32768).fill(-1);
+
+    if (activeBins.length === 0) {
+      return { palette, colorCount: 1, lut };
+    }
+
+    if (activeBins.length <= maxColors) {
+      for (let i = 0; i < activeBins.length; i++) {
+        const bin = activeBins[i];
+        const c = counts[bin];
+        palette[i * 3] = Math.round(sumR[bin] / c);
+        palette[i * 3 + 1] = Math.round(sumG[bin] / c);
+        palette[i * 3 + 2] = Math.round(sumB[bin] / c);
+        lut[bin] = i;
+      }
+      return { palette, colorCount: activeBins.length, lut };
+    }
+
+    const binsArr = new Int32Array(activeBins);
+
+    const makeBox = (start, end) => {
+      let minR = 31;
+      let maxR = 0;
+      let minG = 31;
+      let maxG = 0;
+      let minB = 31;
+      let maxB = 0;
+      let weight = 0;
+      for (let i = start; i < end; i++) {
+        const bin = binsArr[i];
+        const r5 = (bin >> 10) & 31;
+        const g5 = (bin >> 5) & 31;
+        const b5 = bin & 31;
+        if (r5 < minR) minR = r5;
+        if (r5 > maxR) maxR = r5;
+        if (g5 < minG) minG = g5;
+        if (g5 > maxG) maxG = g5;
+        if (b5 < minB) minB = b5;
+        if (b5 > maxB) maxB = b5;
+        weight += counts[bin];
+      }
+      const rangeR = maxR - minR;
+      const rangeG = maxG - minG;
+      const rangeB = maxB - minB;
+      const maxRange = Math.max(rangeR, rangeG, rangeB);
+      const axis = rangeR >= rangeG && rangeR >= rangeB ? 0 : rangeG >= rangeB ? 1 : 2;
+      return { start, end, weight, maxRange, axis };
+    };
+
+    const boxes = [makeBox(0, binsArr.length)];
+
+    while (boxes.length < maxColors) {
+      let bestIdx = -1;
+      let bestScore = -1;
+      for (let i = 0; i < boxes.length; i++) {
+        const b = boxes[i];
+        if (b.end - b.start < 2) continue;
+        if (b.maxRange > bestScore) {
+          bestScore = b.maxRange;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx === -1) break;
+
+      const box = boxes[bestIdx];
+      const slice = Array.from(binsArr.subarray(box.start, box.end));
+      const shift = box.axis === 0 ? 10 : box.axis === 1 ? 5 : 0;
+      slice.sort((a, b) => ((a >> shift) & 31) - ((b >> shift) & 31));
+      for (let i = 0; i < slice.length; i++) {
+        binsArr[box.start + i] = slice[i];
+      }
+
+      const halfWeight = box.weight * 0.5;
+      let accum = 0;
+      let split = box.start + 1;
+      for (let i = box.start; i < box.end - 1; i++) {
+        accum += counts[binsArr[i]];
+        split = i + 1;
+        if (accum >= halfWeight) break;
+      }
+
+      boxes[bestIdx] = makeBox(box.start, split);
+      boxes.push(makeBox(split, box.end));
+    }
+
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i];
+      let rTotal = 0;
+      let gTotal = 0;
+      let bTotal = 0;
+      let wTotal = 0;
+      for (let j = box.start; j < box.end; j++) {
+        const bin = binsArr[j];
+        rTotal += sumR[bin];
+        gTotal += sumG[bin];
+        bTotal += sumB[bin];
+        wTotal += counts[bin];
+      }
+      if (wTotal > 0) {
+        palette[i * 3] = Math.round(rTotal / wTotal);
+        palette[i * 3 + 1] = Math.round(gTotal / wTotal);
+        palette[i * 3 + 2] = Math.round(bTotal / wTotal);
+      }
+      for (let j = box.start; j < box.end; j++) {
+        lut[binsArr[j]] = i;
+      }
+    }
+
+    return { palette, colorCount: boxes.length, lut };
+  }
+
+  function lookupPaletteColor(r, g, b, paletteObj) {
+    const r5 = r >> 3;
+    const g5 = g >> 3;
+    const b5 = b >> 3;
+    const bin = (r5 << 10) | (g5 << 5) | b5;
+    let idx = paletteObj.lut[bin];
+    if (idx !== -1) return idx;
+
+    const { palette, colorCount } = paletteObj;
+    const qr = (r5 << 3) | 4;
+    const qg = (g5 << 3) | 4;
+    const qb = (b5 << 3) | 4;
+    let bestDist = Infinity;
+    let bestIdx = 0;
+    for (let i = 0; i < colorCount; i++) {
+      const pBase = i * 3;
+      const dr = qr - palette[pBase];
+      const dg = qg - palette[pBase + 1];
+      const db = qb - palette[pBase + 2];
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    paletteObj.lut[bin] = bestIdx;
+    return bestIdx;
+  }
+
+  function gifLzwEncode(indices, minCodeSize = 8) {
+    const clearCode = 1 << minCodeSize;
+    const eoiCode = clearCode + 1;
+    const hashKeys = new Int32Array(LZW_HASH_SIZE).fill(-1);
+    const hashVals = new Int32Array(LZW_HASH_SIZE);
+
+    const blocks = [];
+    const subBlock = new Uint8Array(256);
+    let subLen = 0;
+    let bitBuf = 0;
+    let bitCount = 0;
+
+    const flushSubBlock = () => {
+      if (subLen === 0) return;
+      const chunk = new Uint8Array(subLen + 1);
+      chunk[0] = subLen;
+      chunk.set(subBlock.subarray(0, subLen), 1);
+      blocks.push(chunk);
+      subLen = 0;
+    };
+
+    const emitBits = (code, size) => {
+      bitBuf |= code << bitCount;
+      bitCount += size;
+      while (bitCount >= 8) {
+        subBlock[subLen++] = bitBuf & 0xff;
+        bitBuf >>>= 8;
+        bitCount -= 8;
+        if (subLen === 255) flushSubBlock();
+      }
+    };
+
+    let codeSize = minCodeSize + 1;
+    let nextCode = eoiCode + 1;
+
+    emitBits(clearCode, codeSize);
+
+    if (indices.length > 0) {
+      let prefix = indices[0];
+      for (let i = 1; i < indices.length; i++) {
+        const k = indices[i];
+        const combo = (prefix << 8) | k;
+        let h = ((prefix << 4) ^ k) % LZW_HASH_SIZE;
+        const step = 1 + (combo % (LZW_HASH_SIZE - 2));
+
+        while (hashKeys[h] !== -1 && hashKeys[h] !== combo) {
+          h -= step;
+          if (h < 0) h += LZW_HASH_SIZE;
+        }
+
+        if (hashKeys[h] === combo) {
+          prefix = hashVals[h];
+        } else {
+          emitBits(prefix, codeSize);
+          if (nextCode < 4096) {
+            hashKeys[h] = combo;
+            hashVals[h] = nextCode;
+            nextCode++;
+            if (nextCode > 1 << codeSize && codeSize < 12) {
+              codeSize++;
+            }
+          } else {
+            emitBits(clearCode, codeSize);
+            hashKeys.fill(-1);
+            codeSize = minCodeSize + 1;
+            nextCode = eoiCode + 1;
+          }
+          prefix = k;
+        }
+      }
+      emitBits(prefix, codeSize);
+    }
+
+    emitBits(eoiCode, codeSize);
+
+    if (bitCount > 0) {
+      subBlock[subLen++] = bitBuf & 0xff;
+    }
+    flushSubBlock();
+    blocks.push(new Uint8Array([0]));
+
+    let totalLen = 0;
+    for (let i = 0; i < blocks.length; i++) totalLen += blocks[i].length;
+    const out = new Uint8Array(totalLen);
+    let pos = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      out.set(blocks[i], pos);
+      pos += blocks[i].length;
+    }
+    return out;
+  }
+
+  function sampleGlobalRgb(frames, width, height, maxTotalSamples = 180000) {
+    const totalPixels = frames.length * width * height;
+    const stride = Math.max(1, Math.floor(totalPixels / maxTotalSamples));
+    const estCount = Math.ceil(totalPixels / stride);
+    const samples = new Uint8Array(estCount * 3);
+    let writeIdx = 0;
+    let globalPixel = 0;
+
+    for (let f = 0; f < frames.length; f++) {
+      const data = frames[f].data;
+      const pxCount = width * height;
+      for (let p = 0; p < pxCount; p++) {
+        if (globalPixel % stride === 0 && writeIdx + 3 <= samples.length) {
+          const s = p * 4;
+          samples[writeIdx++] = data[s];
+          samples[writeIdx++] = data[s + 1];
+          samples[writeIdx++] = data[s + 2];
+        }
+        globalPixel++;
+      }
+    }
+    return samples.subarray(0, writeIdx);
+  }
+
+  function sampleRectRgb(data, width, left, top, boxW, boxH, maxSamples = 90000) {
+    const total = boxW * boxH;
+    const stride = Math.max(1, Math.floor(total / maxSamples));
+    const samples = new Uint8Array(Math.ceil(total / stride) * 3);
+    let writeIdx = 0;
+    let counter = 0;
+
+    for (let y = top; y < top + boxH; y++) {
+      const rowBase = y * width;
+      for (let x = left; x < left + boxW; x++) {
+        if (counter % stride === 0 && writeIdx + 3 <= samples.length) {
+          const s = (rowBase + x) * 4;
+          samples[writeIdx++] = data[s];
+          samples[writeIdx++] = data[s + 1];
+          samples[writeIdx++] = data[s + 2];
+        }
+        counter++;
+      }
+    }
+    return samples.subarray(0, writeIdx);
+  }
+
+  function clampRgbByte(v) {
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+
+  function mapRegionPixels({
+    data,
+    prevCanvas,
+    width,
+    left,
+    top,
+    boxW,
+    boxH,
+    paletteObj,
+    ditherAmp,
+    diffTolerance,
+    allowTransparency,
+  }) {
+    const indices = new Uint8Array(boxW * boxH);
+    let sqErrSum = 0;
+    let opaqueCount = 0;
+    let outPos = 0;
+
+    for (let y = top; y < top + boxH; y++) {
+      const rowBase = y * width;
+      const bayerRow = (y & 3) * 4;
+      for (let x = left; x < left + boxW; x++) {
+        const pIdx = (rowBase + x) * 4;
+        const r = data[pIdx];
+        const g = data[pIdx + 1];
+        const b = data[pIdx + 2];
+
+        if (allowTransparency) {
+          const diff =
+            Math.abs(r - prevCanvas[pIdx]) +
+            Math.abs(g - prevCanvas[pIdx + 1]) +
+            Math.abs(b - prevCanvas[pIdx + 2]);
+          if (diff <= diffTolerance) {
+            indices[outPos++] = GIF_TRANSPARENT_IDX;
+            continue;
+          }
+        }
+
+        const dither = ditherAmp > 0 ? (BAYER_4X4[bayerRow + (x & 3)] / 7.5) * ditherAmp : 0;
+        const dr = clampRgbByte(Math.round(r + dither));
+        const dg = clampRgbByte(Math.round(g + dither));
+        const db = clampRgbByte(Math.round(b + dither));
+
+        const colorIdx = lookupPaletteColor(dr, dg, db, paletteObj);
+        indices[outPos++] = colorIdx;
+
+        const pBase = colorIdx * 3;
+        const qr = paletteObj.palette[pBase];
+        const qg = paletteObj.palette[pBase + 1];
+        const qb = paletteObj.palette[pBase + 2];
+
+        const errR = r - qr;
+        const errG = g - qg;
+        const errB = b - qb;
+        sqErrSum += errR * errR + errG * errG + errB * errB;
+        opaqueCount++;
+      }
+    }
+
+    return {
+      indices,
+      meanSqError: opaqueCount > 0 ? sqErrSum / opaqueCount : 0,
+    };
+  }
+
+  function commitMappedRegionToCanvas(prevCanvas, width, left, top, boxW, boxH, indices, palette) {
+    let pos = 0;
+    for (let y = top; y < top + boxH; y++) {
+      const rowBase = y * width;
+      for (let x = left; x < left + boxW; x++) {
+        const colorIdx = indices[pos++];
+        if (colorIdx === GIF_TRANSPARENT_IDX) continue;
+        const cIdx = (rowBase + x) * 4;
+        const pBase = colorIdx * 3;
+        prevCanvas[cIdx] = palette[pBase];
+        prevCanvas[cIdx + 1] = palette[pBase + 1];
+        prevCanvas[cIdx + 2] = palette[pBase + 2];
+        prevCanvas[cIdx + 3] = 255;
+      }
+    }
+  }
+
+  function writeUint16LE(buf, offset, val) {
+    buf[offset] = val & 0xff;
+    buf[offset + 1] = (val >> 8) & 0xff;
+  }
+
+  function yieldTick() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  /**
+   * Encode RGBA frames into a looping GIF89a byte stream with Median-Cut
+   * quantization, ordered Bayer dithering, inter-frame delta cropping,
+   * duplicate-frame delay merging, and LZW compression.
+   */
+  async function encodeGifFrames(
+    frames,
+    { width, height, loop = 0, quality = 'balanced', onProgress = null, isCancelled = null } = {},
+  ) {
+    if (!Array.isArray(frames) || frames.length === 0) {
+      throw new Error('No frames provided for GIF encoding');
+    }
+    const w = Math.max(1, Math.round(width));
+    const h = Math.max(1, Math.round(height));
+
+    const ditherAmp = quality === 'fast' ? 0 : quality === 'high' ? 10 : 8;
+    const diffTolerance = quality === 'fast' ? 18 : quality === 'high' ? 4 : 10;
+
+    const globalSamples = sampleGlobalRgb(frames, w, h);
+    const globalPaletteObj = buildMedianCutPalette(globalSamples, GIF_MAX_PALETTE_COLORS);
+
+    const prevCanvas = new Uint8ClampedArray(w * h * 4);
+    const emittedFrames = [];
+
+    for (let f = 0; f < frames.length; f++) {
+      if (isCancelled?.()) {
+        throw new Error('Cancelled');
+      }
+
+      const frame = frames[f];
+      const data = frame.data;
+      const delayCs = Math.max(2, Math.min(65535, Math.round(frame.delayCs || 10)));
+
+      let left = 0;
+      let top = 0;
+      let boxW = w;
+      let boxH = h;
+      let allowTransparency = false;
+
+      if (f > 0) {
+        allowTransparency = true;
+        let minX = w;
+        let minY = h;
+        let maxX = -1;
+        let maxY = -1;
+
+        for (let y = 0; y < h; y++) {
+          const rowBase = y * w;
+          for (let x = 0; x < w; x++) {
+            const pIdx = (rowBase + x) * 4;
+            const diff =
+              Math.abs(data[pIdx] - prevCanvas[pIdx]) +
+              Math.abs(data[pIdx + 1] - prevCanvas[pIdx + 1]) +
+              Math.abs(data[pIdx + 2] - prevCanvas[pIdx + 2]);
+            if (diff > diffTolerance) {
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+
+        if (maxX < minX || maxY < minY) {
+          const prev = emittedFrames[emittedFrames.length - 1];
+          if (prev && prev.delayCs + delayCs <= 65535) {
+            prev.delayCs += delayCs;
+            onProgress?.({ stage: 'encode', progress: (f + 1) / frames.length, frame: f + 1, total: frames.length });
+            continue;
+          }
+          left = 0;
+          top = 0;
+          boxW = 1;
+          boxH = 1;
+        } else {
+          left = minX;
+          top = minY;
+          boxW = maxX - minX + 1;
+          boxH = maxY - minY + 1;
+        }
+      }
+
+      let paletteObj = globalPaletteObj;
+      let useLocalPalette = false;
+
+      if (quality === 'high') {
+        const rectSamples = sampleRectRgb(data, w, left, top, boxW, boxH);
+        paletteObj = buildMedianCutPalette(rectSamples, GIF_MAX_PALETTE_COLORS);
+        useLocalPalette = true;
+      }
+
+      let mapped = mapRegionPixels({
+        data,
+        prevCanvas,
+        width: w,
+        left,
+        top,
+        boxW,
+        boxH,
+        paletteObj,
+        ditherAmp,
+        diffTolerance,
+        allowTransparency,
+      });
+
+      if (quality === 'balanced' && mapped.meanSqError > 750) {
+        const rectSamples = sampleRectRgb(data, w, left, top, boxW, boxH);
+        paletteObj = buildMedianCutPalette(rectSamples, GIF_MAX_PALETTE_COLORS);
+        useLocalPalette = true;
+        mapped = mapRegionPixels({
+          data,
+          prevCanvas,
+          width: w,
+          left,
+          top,
+          boxW,
+          boxH,
+          paletteObj,
+          ditherAmp,
+          diffTolerance,
+          allowTransparency,
+        });
+      }
+
+      commitMappedRegionToCanvas(prevCanvas, w, left, top, boxW, boxH, mapped.indices, paletteObj.palette);
+      const lzwData = gifLzwEncode(mapped.indices, 8);
+
+      emittedFrames.push({
+        left,
+        top,
+        boxW,
+        boxH,
+        delayCs,
+        allowTransparency,
+        localPalette: useLocalPalette ? paletteObj.palette : null,
+        lzwData,
+      });
+
+      onProgress?.({ stage: 'encode', progress: (f + 1) / frames.length, frame: f + 1, total: frames.length });
+      if (f % 2 === 1 && f + 1 < frames.length) {
+        await yieldTick();
+      }
+    }
+
+    // Assemble GIF89a binary stream
+    let totalBytes = 6 + 7 + 768 + (loop >= 0 ? 19 : 0) + 1;
+    for (let i = 0; i < emittedFrames.length; i++) {
+      const ef = emittedFrames[i];
+      totalBytes += 8 + 10 + (ef.localPalette ? 768 : 0) + 1 + ef.lzwData.length;
+    }
+
+    const out = new Uint8Array(totalBytes);
+    let pos = 0;
+
+    // Header: GIF89a
+    out[pos++] = 0x47;
+    out[pos++] = 0x49;
+    out[pos++] = 0x46;
+    out[pos++] = 0x38;
+    out[pos++] = 0x39;
+    out[pos++] = 0x61;
+
+    // Logical Screen Descriptor (Global Color Table = 256 colors)
+    writeUint16LE(out, pos, w);
+    pos += 2;
+    writeUint16LE(out, pos, h);
+    pos += 2;
+    out[pos++] = 0xf7;
+    out[pos++] = 0x00;
+    out[pos++] = 0x00;
+
+    // Global Color Table
+    out.set(globalPaletteObj.palette, pos);
+    pos += 768;
+
+    // Netscape 2.0 Application Extension for looping
+    if (loop >= 0) {
+      out[pos++] = 0x21;
+      out[pos++] = 0xff;
+      out[pos++] = 0x0b;
+      const netscape = 'NETSCAPE2.0';
+      for (let i = 0; i < netscape.length; i++) {
+        out[pos++] = netscape.charCodeAt(i);
+      }
+      out[pos++] = 0x03;
+      out[pos++] = 0x01;
+      writeUint16LE(out, pos, Math.min(65535, Math.max(0, loop)));
+      pos += 2;
+      out[pos++] = 0x00;
+    }
+
+    for (let i = 0; i < emittedFrames.length; i++) {
+      const ef = emittedFrames[i];
+
+      // Graphic Control Extension
+      out[pos++] = 0x21;
+      out[pos++] = 0xf9;
+      out[pos++] = 0x04;
+      out[pos++] = ef.allowTransparency ? 0x05 : 0x04;
+      writeUint16LE(out, pos, ef.delayCs);
+      pos += 2;
+      out[pos++] = ef.allowTransparency ? GIF_TRANSPARENT_IDX : 0x00;
+      out[pos++] = 0x00;
+
+      // Image Descriptor
+      out[pos++] = 0x2c;
+      writeUint16LE(out, pos, ef.left);
+      pos += 2;
+      writeUint16LE(out, pos, ef.top);
+      pos += 2;
+      writeUint16LE(out, pos, ef.boxW);
+      pos += 2;
+      writeUint16LE(out, pos, ef.boxH);
+      pos += 2;
+      out[pos++] = ef.localPalette ? 0x87 : 0x00;
+
+      if (ef.localPalette) {
+        out.set(ef.localPalette, pos);
+        pos += 768;
+      }
+
+      // LZW Minimum Code Size + Sub-blocks
+      out[pos++] = 0x08;
+      out.set(ef.lzwData, pos);
+      pos += ef.lzwData.length;
+    }
+
+    // GIF Trailer
+    out[pos++] = 0x3b;
+    return out;
+  }
+
+  function waitVideoLoaded(video, timeoutMs = 12000) {
+    if (video.readyState >= 2 && video.videoWidth > 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        video.removeEventListener('loadeddata', onReady);
+        video.removeEventListener('canplay', onReady);
+        video.removeEventListener('error', onError);
+      };
+      const onReady = () => {
+        if (settled) return;
+        if (video.readyState >= 2 && video.videoWidth > 0) {
+          settled = true;
+          cleanup();
+          resolve();
+        }
+      };
+      const onError = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Failed to decode MP4 video'));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Timed out loading MP4 video'));
+      }, timeoutMs);
+
+      video.addEventListener('loadeddata', onReady);
+      video.addEventListener('canplay', onReady);
+      video.addEventListener('error', onError);
+    });
+  }
+
+  function seekVideoFrame(video, targetTime, timeoutMs = 4000) {
+    if (Math.abs(video.currentTime - targetTime) < 0.0005 && video.readyState >= 2) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        video.removeEventListener('seeked', onSeeked);
+        video.removeEventListener('error', onError);
+      };
+      const onSeeked = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Video seek failed'));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error('Video seek timed out'));
+      }, timeoutMs);
+
+      video.addEventListener('seeked', onSeeked, { once: true });
+      video.addEventListener('error', onError, { once: true });
+      video.currentTime = targetTime;
+    });
+  }
+
+  /**
+   * Transcode an MP4 Blob into a GIF89a Blob locally in the browser using exact
+   * MP4 frame timestamps when available.
+   */
+  async function transcodeMp4BlobToGif(
+    mp4Blob,
+    {
+      fps = 15,
+      maxWidth = 540,
+      quality = 'balanced',
+      maxDurationSec = 15,
+      onProgress = null,
+      isCancelled = null,
+    } = {},
+  ) {
+    if (!mp4Blob) throw new Error('Missing MP4 blob');
+    if (isCancelled?.()) throw new Error('Cancelled');
+
+    const arrayBuffer = await mp4Blob.arrayBuffer();
+    const mp4Meta = parseMp4Metadata(arrayBuffer);
+
+    const objectUrl = URL.createObjectURL(mp4Blob);
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.src = objectUrl;
+
+    try {
+      await waitVideoLoaded(video, 12000);
+      if (isCancelled?.()) throw new Error('Cancelled');
+
+      const srcW = Math.max(1, video.videoWidth || mp4Meta.width || 480);
+      const srcH = Math.max(1, video.videoHeight || mp4Meta.height || 480);
+      const scale = maxWidth > 0 && srcW > maxWidth ? maxWidth / srcW : 1;
+      const outW = Math.max(1, Math.round(srcW * scale));
+      const outH = Math.max(1, Math.round(srcH * scale));
+
+      const schedule = planFrameSchedule(mp4Meta, video.duration, {
+        targetFps: fps,
+        maxDurationSec,
+      });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = outW;
+      canvas.height = outH;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+      const totalFrames = schedule.timestamps.length;
+      const frames = new Array(totalFrames);
+      const maxSeekTime = Number.isFinite(video.duration) && video.duration > 0 ? Math.max(0, video.duration - 0.005) : 0;
+
+      for (let i = 0; i < totalFrames; i++) {
+        if (isCancelled?.()) throw new Error('Cancelled');
+
+        const seekT = Math.max(0, Math.min(schedule.timestamps[i], maxSeekTime));
+        await seekVideoFrame(video, seekT, 4000);
+        ctx.drawImage(video, 0, 0, outW, outH);
+        const imageData = ctx.getImageData(0, 0, outW, outH);
+        frames[i] = {
+          data: imageData.data,
+          delayCs: schedule.delaysCs[i],
+        };
+
+        onProgress?.({
+          stage: 'extract',
+          progress: (i + 1) / totalFrames,
+          frame: i + 1,
+          total: totalFrames,
+        });
+
+        if (i % 4 === 3 && i + 1 < totalFrames) {
+          await yieldTick();
+        }
+      }
+
+      const gifBytes = await encodeGifFrames(frames, {
+        width: outW,
+        height: outH,
+        loop: 0,
+        quality,
+        onProgress,
+        isCancelled,
+      });
+
+      return {
+        blob: new Blob([gifBytes], { type: 'image/gif' }),
+        width: outW,
+        height: outH,
+        frameCount: totalFrames,
+        durationSec: schedule.effectiveDuration,
+        truncated: schedule.truncated,
+      };
+    } finally {
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch (_) {
+        // Ignore media cleanup errors.
+      }
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
   // --- interceptor.js ---
   const MAX_REGISTRY_ENTRIES = 1200;
+  const MAX_VIDEO_KEY_ENTRIES = 2400;
   const tweetMediaRegistry = new Map();
+  const tweetVideoRegistry = new Map();
+  const videoByMediaKeyRegistry = new Map();
   const captureListeners = new Set();
+
+  function setBoundedEntry(map, key, val, limit) {
+    if (map.has(key)) {
+      map.delete(key);
+    }
+    map.set(key, val);
+    while (map.size > limit) {
+      const oldestKey = map.keys().next().value;
+      map.delete(oldestKey);
+    }
+  }
 
   function storeTweetMedia(tweetId, entry) {
     if (!tweetId || !entry || !Array.isArray(entry.photos) || entry.photos.length < 2) return false;
     const existing = tweetMediaRegistry.get(tweetId);
     if (existing && existing.photos.length >= entry.photos.length) return false;
 
-    if (tweetMediaRegistry.has(tweetId)) {
-      tweetMediaRegistry.delete(tweetId);
+    setBoundedEntry(tweetMediaRegistry, tweetId, entry, MAX_REGISTRY_ENTRIES);
+    return true;
+  }
+
+  function indexVideosByMediaKey(tweetId, handle, videos) {
+    for (const video of videos) {
+      if (!video.mediaKey) continue;
+      const existing = videoByMediaKeyRegistry.get(video.mediaKey);
+      if (existing && existing.variants.length >= video.variants.length) continue;
+      setBoundedEntry(
+        videoByMediaKeyRegistry,
+        video.mediaKey,
+        { ...video, handle: handle || existing?.handle || null, tweetId },
+        MAX_VIDEO_KEY_ENTRIES,
+      );
     }
-    tweetMediaRegistry.set(tweetId, entry);
-    while (tweetMediaRegistry.size > MAX_REGISTRY_ENTRIES) {
-      const oldestKey = tweetMediaRegistry.keys().next().value;
-      tweetMediaRegistry.delete(oldestKey);
-    }
+  }
+
+  function storeTweetVideos(tweetId, entry) {
+    if (!tweetId || !entry || !Array.isArray(entry.videos) || entry.videos.length === 0) return false;
+    indexVideosByMediaKey(tweetId, entry.handle, entry.videos);
+    const existing = tweetVideoRegistry.get(tweetId);
+    if (existing && existing.videos.length >= entry.videos.length) return false;
+
+    setBoundedEntry(tweetVideoRegistry, tweetId, entry, MAX_REGISTRY_ENTRIES);
     return true;
   }
 
   function getRegisteredTweetMedia(tweetId) {
     if (!tweetId) return null;
     return tweetMediaRegistry.get(String(tweetId)) || null;
+  }
+
+  function getRegisteredTweetVideos(tweetId) {
+    if (!tweetId) return null;
+    return tweetVideoRegistry.get(String(tweetId)) || null;
+  }
+
+  function getRegisteredVideoByMediaKey(mediaKey) {
+    if (!mediaKey) return null;
+    return videoByMediaKeyRegistry.get(String(mediaKey)) || null;
   }
 
   function onTweetMediaCaptured(listener) {
@@ -420,10 +1771,52 @@
     return photos.length >= 2 ? photos : null;
   }
 
+  function normalizeVideoMediaList(mediaList) {
+    if (!Array.isArray(mediaList) || mediaList.length === 0) return null;
+    const videos = [];
+    for (const item of mediaList) {
+      if (!item || (item.type !== 'animated_gif' && item.type !== 'video')) continue;
+      const rawVariants = item.video_info?.variants;
+      if (!Array.isArray(rawVariants) || rawVariants.length === 0) continue;
+
+      const variants = rawVariants
+        .filter((v) => v && v.content_type === 'video/mp4' && typeof v.url === 'string' && v.url)
+        .map((v) => ({
+          url: v.url,
+          bitrate: Number(v.bitrate) || 0,
+          ...parseVariantDimensions(v.url),
+        }))
+        .sort((a, b) => b.bitrate - a.bitrate);
+
+      if (variants.length === 0) continue;
+
+      const posterUrl = item.media_url_https || item.media_url || null;
+      const bestMp4Url = variants[0].url;
+      const mediaKey = extractVideoMediaKey(posterUrl) || extractVideoMediaKey(bestMp4Url);
+      const width = Number(item.original_info?.width) || variants[0].width || 0;
+      const height = Number(item.original_info?.height) || variants[0].height || 0;
+      const durationMs = Number(item.video_info?.duration_millis) || 0;
+      const mediaId = item.id_str ? String(item.id_str) : null;
+
+      videos.push({
+        mediaId,
+        mediaKey,
+        type: item.type,
+        posterUrl,
+        width,
+        height,
+        durationMs,
+        variants,
+        bestMp4Url,
+      });
+    }
+    return videos.length > 0 ? videos : null;
+  }
+
   /**
    * Recursively walk an X GraphQL or REST JSON payload and index every multi-photo
-   * tweet by rest_id. This captures all photos even when X virtualizes 5-20 image
-   * carousels in the DOM.
+   * and video/GIF tweet by rest_id. This captures all photos and MP4 variants
+   * even when X virtualizes 5-20 image carousels or HLS playback in the DOM.
    */
   function ingestGraphqlObject(root) {
     if (!root || typeof root !== 'object') return 0;
@@ -453,13 +1846,21 @@
         legacy?.entities?.media;
 
       if (tweetId && Array.isArray(mediaList)) {
+        const handle = extractScreenName(cur);
+        const idStr = String(tweetId);
+        let storedThisTweet = false;
+
         const photos = normalizePhotoMediaList(mediaList);
-        if (photos) {
-          const handle = extractScreenName(cur);
-          if (storeTweetMedia(String(tweetId), { handle, photos })) {
-            added++;
-          }
+        if (photos && storeTweetMedia(idStr, { handle, photos })) {
+          storedThisTweet = true;
         }
+
+        const videos = normalizeVideoMediaList(mediaList);
+        if (videos && storeTweetVideos(idStr, { handle, videos })) {
+          storedThisTweet = true;
+        }
+
+        if (storedThisTweet) added++;
       }
 
       const keys = Object.keys(cur);
@@ -476,7 +1877,7 @@
 
   function ingestJsonText(text) {
     if (!text || typeof text !== 'string' || text.length < 40) return;
-    if (!text.includes('pbs.twimg.com/media/')) return;
+    if (!text.includes('pbs.twimg.com/media/') && !text.includes('video.twimg.com/')) return;
     try {
       const parsed = JSON.parse(text);
       const added = ingestGraphqlObject(parsed);
@@ -495,12 +1896,7 @@
     );
   }
 
-  /**
-   * Fallback media extractor that reads tweet media entities directly from X's
-   * React Fiber tree on an <article> node when a tweet rendered before network
-   * interception attached.
-   */
-  function extractTweetMediaFromReactFiber(article, targetTweetId = null) {
+  function walkReactFiberForTweet(article, targetTweetId, extractMedia) {
     try {
       const raw = article?.wrappedJSObject || article;
       if (!raw) return null;
@@ -534,12 +1930,8 @@
               cand.extended_entities?.media ||
               cand.legacy?.extended_entities?.media ||
               cand.entities?.media;
-            const photos = normalizePhotoMediaList(mediaList);
-            if (photos) {
-              const handle = extractScreenName(cand);
-              if (id) storeTweetMedia(String(id), { handle, photos });
-              return { handle, photos };
-            }
+            const result = extractMedia(cand, id, mediaList);
+            if (result) return result;
           }
         }
 
@@ -550,6 +1942,35 @@
       // Gracefully fall back to DOM extraction when Xray/React internals block access.
     }
     return null;
+  }
+
+  /**
+   * Fallback media extractor that reads tweet media entities directly from X's
+   * React Fiber tree on an <article> node when a tweet rendered before network
+   * interception attached.
+   */
+  function extractTweetMediaFromReactFiber(article, targetTweetId = null) {
+    return walkReactFiberForTweet(article, targetTweetId, (cand, id, mediaList) => {
+      const photos = normalizePhotoMediaList(mediaList);
+      if (!photos) return null;
+      const handle = extractScreenName(cand);
+      if (id) storeTweetMedia(String(id), { handle, photos });
+      return { handle, photos };
+    });
+  }
+
+  /**
+   * Fallback video/GIF extractor that reads tweet video entities from X's
+   * React Fiber tree when a tweet rendered before network interception attached.
+   */
+  function extractTweetVideosFromReactFiber(article, targetTweetId = null) {
+    return walkReactFiberForTweet(article, targetTweetId, (cand, id, mediaList) => {
+      const videos = normalizeVideoMediaList(mediaList);
+      if (!videos) return null;
+      const handle = extractScreenName(cand);
+      if (id) storeTweetVideos(String(id), { handle, videos });
+      return { handle, videos };
+    });
   }
 
   let interceptorInstalled = false;
@@ -2327,6 +3748,180 @@
     return galleries;
   }
 
+  function detectGifBadgeInContainer(container, videoEl) {
+    const containerLabel = container.getAttribute?.('aria-label') || '';
+    const videoLabel = videoEl?.getAttribute?.('aria-label') || '';
+    const playerEl = container.querySelector('[data-testid="videoPlayer"]');
+    const playerLabel = playerEl?.getAttribute?.('aria-label') || '';
+    if (/\bGIF\b/i.test(containerLabel) || /\bGIF\b/i.test(videoLabel) || /\bGIF\b/i.test(playerLabel)) {
+      return true;
+    }
+
+    const badges = container.querySelectorAll('span, div');
+    for (const el of badges) {
+      if (el.closest('.xas-injected, button, [role="button"]')) continue;
+      if (el.children.length === 0 && el.textContent?.trim() === 'GIF') {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function resolveVideoStatusInfo(container, fallbackMeta) {
+    const isQuoted = Boolean(container.closest('[tabindex="0"][role="link"]'));
+    const anchor = container.closest('a[href*="/status/"]');
+    let parsed = anchor ? parseStatusHref(anchor.getAttribute('href')) : null;
+    if (!parsed && isQuoted) {
+      const quoteCard = container.closest('[tabindex="0"][role="link"]');
+      const quoteLink =
+        quoteCard?.querySelector('time')?.closest('a[href*="/status/"]') ||
+        quoteCard?.querySelector('a[href*="/status/"]');
+      if (quoteLink) parsed = parseStatusHref(quoteLink.getAttribute('href'));
+    }
+    const handle = parsed?.handle || fallbackMeta.handle;
+    const tweetId =
+      parsed?.tweetId || (isQuoted ? `${fallbackMeta.tweetId}_quote` : fallbackMeta.tweetId);
+    return { isQuoted, handle, tweetId };
+  }
+
+  function collectVideoPlayerContainers(article) {
+    const compNodes = Array.from(article.querySelectorAll('[data-testid="videoComponent"]'));
+    const playerNodes = Array.from(article.querySelectorAll('[data-testid="videoPlayer"]'));
+    const candidates = [];
+
+    for (const node of compNodes) {
+      if (node.closest('.xas-injected') || node.closest('[data-testid="card.wrapper"]')) continue;
+      candidates.push(node);
+    }
+    for (const node of playerNodes) {
+      if (node.closest('.xas-injected') || node.closest('[data-testid="card.wrapper"]')) continue;
+      if (candidates.some((c) => c === node || c.contains(node) || node.contains(c))) continue;
+      candidates.push(node);
+    }
+
+    return candidates.filter((node) => !candidates.some((other) => other !== node && other.contains(node)));
+  }
+
+  /**
+   * Scan a tweet <article> for X GIFs and videos, correlating DOM video players
+   * with GraphQL / React Fiber MP4 variant metadata.
+   */
+  function extractVideosFromArticle(article) {
+    const containers = collectVideoPlayerContainers(article);
+    if (containers.length === 0) return [];
+
+    const fallbackMeta = getFallbackStatusInfo(article);
+    const perTweetIndices = new Map();
+    const preliminary = [];
+
+    for (const container of containers) {
+      const { isQuoted, handle, tweetId } = resolveVideoStatusInfo(container, fallbackMeta);
+      const videoIndex = perTweetIndices.get(tweetId) || 0;
+      perTweetIndices.set(tweetId, videoIndex + 1);
+
+      const videoEl = container.querySelector('video');
+      const sourceSrc = videoEl?.querySelector('source')?.getAttribute('src') || '';
+      const rawVideoSrc =
+        videoEl?.currentSrc || videoEl?.getAttribute('src') || videoEl?.src || sourceSrc || '';
+      const directMp4Url =
+        isTweetVideoUrl(rawVideoSrc) &&
+        !/\.m3u8(?:$|\?)/i.test(rawVideoSrc) &&
+        !rawVideoSrc.startsWith('blob:')
+          ? rawVideoSrc
+          : null;
+
+      const posterAttr = videoEl?.getAttribute('poster') || videoEl?.poster || '';
+      const posterImg = container.querySelector('img');
+      const posterImgSrc = posterImg?.getAttribute('src') || posterImg?.src || '';
+
+      const domMediaKey =
+        extractVideoMediaKey(directMp4Url) ||
+        extractVideoMediaKey(posterAttr) ||
+        extractVideoMediaKey(posterImgSrc);
+
+      const hasGifBadge = detectGifBadgeInContainer(container, videoEl);
+
+      const byKey = domMediaKey ? getRegisteredVideoByMediaKey(domMediaKey) : null;
+      const byTweet = getRegisteredTweetVideos(tweetId);
+      const byFiber = !byKey && !byTweet && !isQuoted ? extractTweetVideosFromReactFiber(article, tweetId) : null;
+      const tweetEntry = byTweet || byFiber;
+
+      let metaItem = null;
+      let resolvedHandle = handle;
+
+      if (byKey) {
+        metaItem = byKey;
+        if (byKey.handle) resolvedHandle = byKey.handle;
+      } else if (tweetEntry && Array.isArray(tweetEntry.videos) && tweetEntry.videos.length > 0) {
+        metaItem =
+          (domMediaKey && tweetEntry.videos.find((v) => v.mediaKey === domMediaKey)) ||
+          tweetEntry.videos[videoIndex] ||
+          (tweetEntry.videos.length === 1 ? tweetEntry.videos[0] : null);
+        if (tweetEntry.handle) resolvedHandle = tweetEntry.handle;
+      } else if (directMp4Url) {
+        const dims = parseVariantDimensions(directMp4Url);
+        metaItem = {
+          mediaId: null,
+          mediaKey: domMediaKey || extractVideoMediaKey(directMp4Url) || directMp4Url,
+          type: hasGifBadge || /\/tweet_video\//i.test(directMp4Url) ? 'animated_gif' : 'video',
+          posterUrl: posterAttr || posterImgSrc || null,
+          width: videoEl?.videoWidth || dims.width || 0,
+          height: videoEl?.videoHeight || dims.height || 0,
+          durationMs:
+            Number.isFinite(videoEl?.duration) && videoEl.duration > 0
+              ? Math.round(videoEl.duration * 1000)
+              : 0,
+          variants: [{ url: directMp4Url, bitrate: 0, ...dims }],
+          bestMp4Url: directMp4Url,
+        };
+      }
+
+      if (!metaItem || !Array.isArray(metaItem.variants) || metaItem.variants.length === 0) {
+        continue;
+      }
+
+      const durationMs =
+        metaItem.durationMs > 0
+          ? metaItem.durationMs
+          : Number.isFinite(videoEl?.duration) && videoEl.duration > 0
+            ? Math.round(videoEl.duration * 1000)
+            : 0;
+
+      const mediaKey = metaItem.mediaKey || domMediaKey || extractVideoMediaKey(metaItem.bestMp4Url);
+      const signature = [
+        tweetId,
+        mediaKey || 'nokey',
+        metaItem.bestMp4Url,
+        metaItem.variants.length,
+        hasGifBadge ? 'gif' : 'v',
+      ].join('|');
+
+      preliminary.push({
+        article,
+        container,
+        handle: resolvedHandle,
+        tweetId,
+        isQuoted,
+        signature,
+        mediaKey,
+        videoIndex,
+        type: metaItem.type,
+        posterUrl: metaItem.posterUrl || posterAttr || posterImgSrc || null,
+        durationMs,
+        width: metaItem.width || videoEl?.videoWidth || 0,
+        height: metaItem.height || videoEl?.videoHeight || 0,
+        variants: metaItem.variants,
+        bestMp4Url: metaItem.bestMp4Url,
+        hasGifBadge,
+      });
+    }
+
+    return preliminary.map((item) => ({
+      ...item,
+      videoCount: perTweetIndices.get(item.tweetId) || 1,
+    }));
+  }
+
   // --- icons.js ---
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -2355,6 +3950,14 @@
       'M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z',
     chevron_left: 'M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z',
     chevron_right: 'M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z',
+    gif_box:
+      'M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM9.5 13v-1h1v1c0 .55-.45 1-1 1h-1c-.55 0-1-.45-1-1v-2c0-.55.45-1 1-1h1c.55 0 1 .45 1 1h-1v-1h-1v2h1zm3 1h-1v-4h1v4zm4-3h-2v.5H16v1h-1.5V14h-1v-4h3v1z',
+    movie:
+      'M4 6.47L5.76 10H20v8H4V6.47M22 4h-4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4z',
+    check: 'M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z',
+    tune:
+      'M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z',
+    stop: 'M6 6h12v12H6z',
   };
 
   function createIcon(name, size = 16) {
@@ -2412,6 +4015,12 @@
       ? '滚轮缩放 · 拖拽平移 · ←/→ 切换画廊 · 单击适应/1:1 · D 下载 / C 复制 / ESC 关闭'
       : 'Wheel zoom · Drag pan · ←/→ switch item · Click Fit/1:1 · D download / C copy / ESC close',
     settingsHeading: IS_ZH ? 'X Art Stitcher 设置' : 'X Art Stitcher Settings',
+    settingsSubtitle: IS_ZH
+      ? '拼图检测、GIF 转存与导出偏好设置'
+      : 'Stitching, GIF conversion & export preferences',
+    sectionStitching: IS_ZH ? '画作拼图' : 'Artwork Stitching',
+    sectionGifVideo: IS_ZH ? 'GIF 与视频导出' : 'GIF & Video Export',
+    sectionOutput: IS_ZH ? '输出与高级设置' : 'Output & Advanced',
     optAutoDetect: IS_ZH ? '自动识别多图拼图' : 'Auto-detect split artworks',
     optAutoDetectDesc: IS_ZH
       ? '进入视野时分析边缘像素连续性，判断是否为拆分画作'
@@ -2425,17 +4034,74 @@
       ? '根据相邻边相似度尝试还原被打乱顺序的切片'
       : 'Search tile permutations to restore scrambled multi-image slices',
     optSensitivity: IS_ZH ? '自动识别灵敏度' : 'Detection sensitivity',
-    sensStrict: IS_ZH ? '严格（极少误判）' : 'Strict (fewest false positives)',
-    sensNormal: IS_ZH ? '标准（推荐）' : 'Normal (recommended)',
-    sensLoose: IS_ZH ? '宽松（适配大缝隙/重压缩）' : 'Loose (handles wider gaps)',
-    optFormat: IS_ZH ? '下载图片格式' : 'Download format',
+    optSensitivityDesc: IS_ZH
+      ? '控制边缘拼接判定阈值与抗压缩容差'
+      : 'Controls seam-matching strictness and compression tolerance',
+    sensStrict: IS_ZH ? '严格' : 'Strict',
+    sensNormal: IS_ZH ? '标准' : 'Normal',
+    sensLoose: IS_ZH ? '宽松' : 'Loose',
+    optEnableGifTools: IS_ZH ? '启用 GIF / 视频导出工具' : 'Enable GIF & video export tools',
+    optEnableGifToolsDesc: IS_ZH
+      ? '在 X 的 GIF 与视频播放器右上角显示转存 GIF / 下载 MP4 悬浮控制条'
+      : 'Show floating GIF conversion and MP4 download controls on X videos',
+    optAutoDetectGifVideos: IS_ZH ? '自动识别类 GIF 无声短视频' : 'Auto-detect GIF-like silent videos',
+    optAutoDetectGifVideosDesc: IS_ZH
+      ? '自动探测短时无音轨视频的 MP4 头信息并高亮提示转存为 GIF'
+      : 'Probe short silent MP4 headers and highlight them for instant GIF export',
+    optShowOnRegularVideos: IS_ZH ? '在普通视频上显示折叠按钮' : 'Show compact button on regular videos',
+    optShowOnRegularVideosDesc: IS_ZH
+      ? '为包含音轨或较长的普通视频提供轻量化 GIF / MP4 导出入口'
+      : 'Keep a subtle collapsed GIF / MP4 pill on regular videos',
+    optGifFps: IS_ZH ? 'GIF 导出帧率' : 'GIF frame rate',
+    optGifFpsDesc: IS_ZH
+      ? '原生 GIF 会尽量保留原有帧节奏，高帧率视频将平滑降采样'
+      : 'Native GIFs preserve cadence when possible; higher FPS clips resample smoothly',
+    optGifMaxWidth: IS_ZH ? 'GIF 最大宽度' : 'GIF max width',
+    optGifMaxWidthDesc: IS_ZH
+      ? '超过该宽度的视频将按比例缩小，以平衡清晰度与文件体积'
+      : 'Downscales wider videos proportionally to balance sharpness and file size',
+    optWidthOrig: IS_ZH ? '原尺寸' : 'Orig',
+    optGifQuality: IS_ZH ? 'GIF 编码质量' : 'GIF encoding quality',
+    optGifQualityDesc: IS_ZH
+      ? '“均衡”使用有序抖动与帧间差分裁剪；“高画质”每帧独立生成调色板'
+      : 'Balanced uses ordered dithering & delta cropping; High builds per-frame palettes',
+    qualFast: IS_ZH ? '极速' : 'Fast',
+    qualBalanced: IS_ZH ? '均衡' : 'Balanced',
+    qualHigh: IS_ZH ? '高画质' : 'High',
+    optGifMaxDuration: IS_ZH ? 'GIF 最大截取时长' : 'Max GIF clip duration',
+    optGifMaxDurationDesc: IS_ZH
+      ? '超长视频将截取前若干秒进行转码，防止浏览器内存占用过高'
+      : 'Clips longer than this limit export only the opening segment',
+    optFormat: IS_ZH ? '图片下载格式' : 'Image download format',
+    optFormatDesc: IS_ZH
+      ? '适用于拼合画作及单图下载（GIF 导出固定为 .gif）'
+      : 'Applies to stitched and standalone images (GIF export always outputs .gif)',
     optTemplate: IS_ZH ? '下载文件名模板' : 'Filename template',
     optTemplateDesc: IS_ZH
       ? '可用占位符: {handle}, {tweetId}, {layout}'
       : 'Placeholders: {handle}, {tweetId}, {layout}',
+    previewPrefix: IS_ZH ? '预览: ' : 'Preview: ',
     optDebug: IS_ZH ? '控制台输出调试日志' : 'Console debug logging',
+    optDebugDesc: IS_ZH
+      ? '在浏览器开发者工具中记录检测分数与视频探测信息'
+      : 'Print detection scores and MP4 probe metadata to console',
     save: IS_ZH ? '保存' : 'Save',
     cancel: IS_ZH ? '取消' : 'Cancel',
+    gifLabel: 'GIF',
+    mp4Label: 'MP4',
+    exportGifLabel: IS_ZH ? '导出 GIF' : 'Export GIF',
+    saveGifTitle: IS_ZH ? '转码并下载 .gif 动图' : 'Convert and download as .gif',
+    saveGifLikeTitle: IS_ZH
+      ? '检测到无声类 GIF 短视频 — 点击转码下载 .gif'
+      : 'Silent GIF-like video detected — click to save .gif',
+    expandVideoToolsTitle: IS_ZH ? '展开 GIF / MP4 导出选项' : 'Expand GIF / MP4 export controls',
+    collapseVideoToolsTitle: IS_ZH ? '收起' : 'Collapse',
+    downloadMp4Title: IS_ZH ? '下载原始 .mp4 视频' : 'Download raw .mp4 video',
+    cancelGifTitle: IS_ZH ? '取消当前任务' : 'Cancel current task',
+    stageFetch: IS_ZH ? '获取视频中...' : 'Fetching MP4...',
+    stageExtract: IS_ZH ? '抽帧' : 'Extracting',
+    stageEncode: IS_ZH ? '编码 GIF' : 'Encoding GIF',
+    gifCancelled: IS_ZH ? '已取消 GIF 导出' : 'GIF export cancelled',
   };
 
   function t(key) {
@@ -2815,131 +4481,345 @@
     loadSlide(currentIdx);
   }
 
+  function isPageLightTheme() {
+    try {
+      for (const el of [document.body, document.documentElement]) {
+        if (!el) continue;
+        const bg = window.getComputedStyle(el).backgroundColor;
+        const match = bg && bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
+        if (!match) continue;
+        const alpha = match[4] !== undefined ? Number(match[4]) : 1;
+        if (alpha === 0) continue;
+        const lum = (0.299 * Number(match[1]) + 0.587 * Number(match[2]) + 0.114 * Number(match[3])) / 255;
+        return lum > 0.5;
+      }
+    } catch (_) {
+      // Default to dark tonal theme if computed style is unavailable.
+    }
+    return false;
+  }
+
+  let activeModalCleanup = null;
+
   function openSettingsModal(currentConfig, onSave) {
-    const existing = document.querySelector('.xas-modal-backdrop');
-    if (existing) existing.remove();
+    if (activeModalCleanup) {
+      activeModalCleanup();
+    } else {
+      const existing = document.querySelector('.xas-modal-backdrop');
+      if (existing) existing.remove();
+    }
 
     const backdrop = document.createElement('div');
-    backdrop.className = 'xas-modal-backdrop';
+    backdrop.className = isPageLightTheme()
+      ? 'xas-modal-backdrop xas-theme-light'
+      : 'xas-modal-backdrop';
 
     const modal = document.createElement('div');
     modal.className = 'xas-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'xas-settings-title');
+
+    const closeModal = () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      backdrop.remove();
+      if (activeModalCleanup === closeModal) activeModalCleanup = null;
+    };
+    activeModalCleanup = closeModal;
+
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        stopBubble(e);
+        closeModal();
+      }
+    };
 
     const head = document.createElement('div');
     head.className = 'xas-modal-head';
+
+    const headIcon = document.createElement('div');
+    headIcon.className = 'xas-m3-head-icon';
+    headIcon.appendChild(createIcon('tune', 20));
+
+    const headText = document.createElement('div');
+    headText.className = 'xas-m3-head-text';
     const heading = document.createElement('h3');
+    heading.id = 'xas-settings-title';
     heading.textContent = t('settingsHeading');
-    const closeX = makeIconButton({
-      icon: 'close',
-      title: t('lbClose'),
-      size: 18,
-      onClick: () => backdrop.remove(),
-    });
-    head.appendChild(heading);
+    const subtitle = document.createElement('div');
+    subtitle.className = 'xas-m3-head-subtitle';
+    subtitle.textContent = t('settingsSubtitle');
+    headText.appendChild(heading);
+    headText.appendChild(subtitle);
+
+    const closeX = document.createElement('button');
+    closeX.type = 'button';
+    closeX.className = 'xas-m3-icon-btn';
+    closeX.title = t('lbClose');
+    closeX.setAttribute('aria-label', t('lbClose'));
+    closeX.appendChild(createIcon('close', 20));
+    closeX.addEventListener('click', closeModal);
+
+    head.appendChild(headIcon);
+    head.appendChild(headText);
     head.appendChild(closeX);
 
     const body = document.createElement('div');
     body.className = 'xas-modal-body';
 
     const draft = { ...currentConfig };
+    const previewListeners = [];
 
-    const addToggle = (label, desc, key) => {
+    const createSection = (titleText) => {
+      const section = document.createElement('div');
+      section.className = 'xas-m3-section';
+      const titleEl = document.createElement('div');
+      titleEl.className = 'xas-m3-section-title';
+      titleEl.textContent = titleText;
+      const card = document.createElement('div');
+      card.className = 'xas-m3-card';
+      section.appendChild(titleEl);
+      section.appendChild(card);
+      body.appendChild(section);
+      return card;
+    };
+
+    const addSwitchRow = (card, label, desc, key) => {
       const row = document.createElement('label');
-      row.className = 'xas-field';
-      const left = document.createElement('div');
+      row.className = 'xas-m3-row';
+
+      const copy = document.createElement('div');
+      copy.className = 'xas-m3-row-copy';
       const titleDiv = document.createElement('div');
+      titleDiv.className = 'xas-m3-row-title';
       titleDiv.textContent = label;
-      const descDiv = document.createElement('div');
-      descDiv.className = 'xas-field-desc';
-      descDiv.textContent = desc;
-      left.appendChild(titleDiv);
-      if (desc) left.appendChild(descDiv);
+      copy.appendChild(titleDiv);
+      if (desc) {
+        const descDiv = document.createElement('div');
+        descDiv.className = 'xas-m3-row-desc';
+        descDiv.textContent = desc;
+        copy.appendChild(descDiv);
+      }
+
+      const switchWrap = document.createElement('span');
+      switchWrap.className = 'xas-m3-switch';
 
       const input = document.createElement('input');
       input.type = 'checkbox';
-      input.className = 'xas-checkbox';
+      input.className = 'xas-m3-switch-input';
       input.checked = Boolean(draft[key]);
+      input.setAttribute('role', 'switch');
+      input.setAttribute('aria-checked', String(input.checked));
+
+      const track = document.createElement('span');
+      track.className = 'xas-m3-switch-track';
+      const thumb = document.createElement('span');
+      thumb.className = 'xas-m3-switch-thumb';
+      thumb.appendChild(createIcon('check', 14));
+      track.appendChild(thumb);
+
       input.addEventListener('change', () => {
         draft[key] = input.checked;
+        input.setAttribute('aria-checked', String(input.checked));
       });
 
-      row.appendChild(left);
-      row.appendChild(input);
-      body.appendChild(row);
+      switchWrap.appendChild(input);
+      switchWrap.appendChild(track);
+      row.appendChild(copy);
+      row.appendChild(switchWrap);
+      card.appendChild(row);
     };
 
-    const addSelect = (label, key, options) => {
-      const row = document.createElement('label');
-      row.className = 'xas-field';
-      const text = document.createElement('span');
-      text.textContent = label;
-      const select = document.createElement('select');
-      select.className = 'xas-select';
-      for (const opt of options) {
-        const o = document.createElement('option');
-        o.value = opt.value;
-        o.textContent = opt.label;
-        if (draft[key] === opt.value) o.selected = true;
-        select.appendChild(o);
+    const addSegmentedRow = (card, label, desc, key, options) => {
+      const row = document.createElement('div');
+      row.className = 'xas-m3-row-stack';
+
+      const copy = document.createElement('div');
+      copy.className = 'xas-m3-row-copy';
+      const titleDiv = document.createElement('div');
+      titleDiv.className = 'xas-m3-row-title';
+      titleDiv.textContent = label;
+      copy.appendChild(titleDiv);
+      if (desc) {
+        const descDiv = document.createElement('div');
+        descDiv.className = 'xas-m3-row-desc';
+        descDiv.textContent = desc;
+        copy.appendChild(descDiv);
       }
-      select.addEventListener('change', () => {
-        draft[key] = select.value;
-      });
-      row.appendChild(text);
-      row.appendChild(select);
-      body.appendChild(row);
+
+      const group = document.createElement('div');
+      group.className = 'xas-m3-segmented';
+      group.setAttribute('role', 'radiogroup');
+      group.setAttribute('aria-label', label);
+
+      const buttons = [];
+      const syncActive = () => {
+        for (const item of buttons) {
+          const isSelected = draft[key] === item.value;
+          item.btn.classList.toggle('xas-m3-seg-active', isSelected);
+          item.btn.setAttribute('aria-checked', String(isSelected));
+          item.checkEl.style.display = isSelected ? 'block' : 'none';
+        }
+      };
+
+      for (const opt of options) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'xas-m3-seg-btn';
+        btn.setAttribute('role', 'radio');
+
+        const checkEl = createIcon('check', 14);
+        const textSpan = document.createElement('span');
+        textSpan.textContent = opt.label;
+        btn.appendChild(checkEl);
+        btn.appendChild(textSpan);
+
+        btn.addEventListener('click', () => {
+          draft[key] = opt.value;
+          syncActive();
+          for (const listener of previewListeners) listener();
+        });
+
+        buttons.push({ btn, checkEl, value: opt.value });
+        group.appendChild(btn);
+      }
+
+      syncActive();
+      row.appendChild(copy);
+      row.appendChild(group);
+      card.appendChild(row);
     };
 
-    addToggle(t('optAutoDetect'), t('optAutoDetectDesc'), 'autoDetect');
-    addToggle(t('optAutoStitch'), t('optAutoStitchDesc'), 'autoStitch');
-    addToggle(t('optAutoUnshuffle'), t('optAutoUnshuffleDesc'), 'autoUnshuffle');
-    addSelect(t('optSensitivity'), 'sensitivity', [
+    const addTextFieldRow = (card, label, desc, key, previewFormatter) => {
+      const row = document.createElement('label');
+      row.className = 'xas-m3-row-stack';
+
+      const copy = document.createElement('div');
+      copy.className = 'xas-m3-row-copy';
+      const titleDiv = document.createElement('div');
+      titleDiv.className = 'xas-m3-row-title';
+      titleDiv.textContent = label;
+      copy.appendChild(titleDiv);
+      if (desc) {
+        const descDiv = document.createElement('div');
+        descDiv.className = 'xas-m3-row-desc';
+        descDiv.textContent = desc;
+        copy.appendChild(descDiv);
+      }
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'xas-m3-textfield';
+      input.value = draft[key] || '';
+
+      const previewEl = document.createElement('div');
+      previewEl.className = 'xas-m3-preview-line';
+      const updatePreview = () => {
+        if (previewFormatter) {
+          previewEl.textContent = previewFormatter(draft);
+        }
+      };
+      updatePreview();
+      previewListeners.push(updatePreview);
+
+      input.addEventListener('input', () => {
+        draft[key] = input.value;
+        updatePreview();
+      });
+
+      row.appendChild(copy);
+      row.appendChild(input);
+      if (previewFormatter) row.appendChild(previewEl);
+      card.appendChild(row);
+    };
+
+    const stitchingCard = createSection(t('sectionStitching'));
+    addSwitchRow(stitchingCard, t('optAutoDetect'), t('optAutoDetectDesc'), 'autoDetect');
+    addSwitchRow(stitchingCard, t('optAutoStitch'), t('optAutoStitchDesc'), 'autoStitch');
+    addSwitchRow(stitchingCard, t('optAutoUnshuffle'), t('optAutoUnshuffleDesc'), 'autoUnshuffle');
+    addSegmentedRow(stitchingCard, t('optSensitivity'), t('optSensitivityDesc'), 'sensitivity', [
       { value: 'strict', label: t('sensStrict') },
       { value: 'normal', label: t('sensNormal') },
       { value: 'loose', label: t('sensLoose') },
     ]);
-    addSelect(t('optFormat'), 'downloadFormat', [
-      { value: 'png', label: 'PNG (Lossless)' },
+
+    const gifCard = createSection(t('sectionGifVideo'));
+    addSwitchRow(gifCard, t('optEnableGifTools'), t('optEnableGifToolsDesc'), 'enableGifTools');
+    addSwitchRow(
+      gifCard,
+      t('optAutoDetectGifVideos'),
+      t('optAutoDetectGifVideosDesc'),
+      'autoDetectGifVideos',
+    );
+    addSwitchRow(
+      gifCard,
+      t('optShowOnRegularVideos'),
+      t('optShowOnRegularVideosDesc'),
+      'showOnRegularVideos',
+    );
+    addSegmentedRow(gifCard, t('optGifFps'), t('optGifFpsDesc'), 'gifFps', [
+      { value: 10, label: '10 fps' },
+      { value: 15, label: '15 fps' },
+      { value: 20, label: '20 fps' },
+      { value: 25, label: '25 fps' },
+    ]);
+    addSegmentedRow(gifCard, t('optGifMaxWidth'), t('optGifMaxWidthDesc'), 'gifMaxWidth', [
+      { value: 480, label: '480px' },
+      { value: 540, label: '540px' },
+      { value: 720, label: '720px' },
+      { value: 0, label: t('optWidthOrig') },
+    ]);
+    addSegmentedRow(gifCard, t('optGifQuality'), t('optGifQualityDesc'), 'gifQuality', [
+      { value: 'fast', label: t('qualFast') },
+      { value: 'balanced', label: t('qualBalanced') },
+      { value: 'high', label: t('qualHigh') },
+    ]);
+    addSegmentedRow(gifCard, t('optGifMaxDuration'), t('optGifMaxDurationDesc'), 'gifMaxDuration', [
+      { value: 8, label: '8s' },
+      { value: 15, label: '15s' },
+      { value: 25, label: '25s' },
+    ]);
+
+    const outputCard = createSection(t('sectionOutput'));
+    addSegmentedRow(outputCard, t('optFormat'), t('optFormatDesc'), 'downloadFormat', [
+      { value: 'png', label: 'PNG' },
       { value: 'jpeg', label: 'JPEG (95%)' },
       { value: 'webp', label: 'WebP (95%)' },
     ]);
-
-    const tplWrap = document.createElement('label');
-    tplWrap.className = 'xas-field-col';
-    const tplLabel = document.createElement('span');
-    tplLabel.textContent = t('optTemplate');
-    const tplInput = document.createElement('input');
-    tplInput.type = 'text';
-    tplInput.className = 'xas-input';
-    tplInput.value = draft.filenameTemplate;
-    tplInput.addEventListener('input', () => {
-      draft.filenameTemplate = tplInput.value;
-    });
-    const tplDesc = document.createElement('span');
-    tplDesc.className = 'xas-field-desc';
-    tplDesc.textContent = t('optTemplateDesc');
-    tplWrap.appendChild(tplLabel);
-    tplWrap.appendChild(tplInput);
-    tplWrap.appendChild(tplDesc);
-    body.appendChild(tplWrap);
-
-    addToggle(t('optDebug'), '', 'debug');
+    addTextFieldRow(
+      outputCard,
+      t('optTemplate'),
+      t('optTemplateDesc'),
+      'filenameTemplate',
+      (d) =>
+        `${t('previewPrefix')}${formatFilename(d.filenameTemplate, {
+          handle: 'artist',
+          tweetId: '189000123',
+          layout: '2x2',
+          ext: d.downloadFormat || 'png',
+        })}`,
+    );
+    addSwitchRow(outputCard, t('optDebug'), t('optDebugDesc'), 'debug');
 
     const foot = document.createElement('div');
     foot.className = 'xas-modal-foot';
+
     const cancelBtn = document.createElement('button');
     cancelBtn.type = 'button';
-    cancelBtn.className = 'xas-lb-btn';
+    cancelBtn.className = 'xas-m3-text-btn';
     cancelBtn.textContent = t('cancel');
-    cancelBtn.addEventListener('click', () => backdrop.remove());
+    cancelBtn.addEventListener('click', closeModal);
 
     const saveBtn = document.createElement('button');
     saveBtn.type = 'button';
-    saveBtn.className = 'xas-lb-btn xas-lb-primary';
-    saveBtn.textContent = t('save');
+    saveBtn.className = 'xas-m3-filled-btn';
+    saveBtn.appendChild(createIcon('check', 16));
+    const saveLabel = document.createElement('span');
+    saveLabel.textContent = t('save');
+    saveBtn.appendChild(saveLabel);
     saveBtn.addEventListener('click', () => {
       onSave(draft);
-      backdrop.remove();
+      closeModal();
     });
 
     foot.appendChild(cancelBtn);
@@ -2951,9 +4831,10 @@
     backdrop.appendChild(modal);
 
     backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop) backdrop.remove();
+      if (e.target === backdrop) closeModal();
     });
 
+    window.addEventListener('keydown', onKeyDown, true);
     document.body.appendChild(backdrop);
   }
 
@@ -3425,11 +5306,299 @@
     };
   }
 
+  function formatVideoProgressText(info) {
+    if (!info) return '';
+    if (info.stage === 'fetch') return t('stageFetch');
+    const pct =
+      typeof info.progress === 'number' ? `${Math.round(info.progress * 100)}%` : '';
+    if (info.stage === 'extract') {
+      return `${t('stageExtract')} ${pct}`.trim();
+    }
+    if (info.stage === 'encode') {
+      return `${t('stageEncode')} ${pct}`.trim();
+    }
+    return pct || t('stageFetch');
+  }
+
+  /**
+   * Manage the floating GIF / MP4 export toolbar overlaid on an X GIF or video player.
+   */
+  function createVideoUI(videoTarget, callbacks) {
+    const { container } = videoTarget;
+    container.classList.add('xas-video-root');
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'xas-injected xas-video-toolbar';
+
+    for (const evtName of ['click', 'pointerdown', 'mousedown', 'touchstart']) {
+      toolbar.addEventListener(evtName, (e) => {
+        if (evtName === 'click') {
+          stopBubble(e);
+        } else {
+          e.stopPropagation();
+        }
+      });
+    }
+
+    container.appendChild(toolbar);
+
+    const state = {
+      classification: videoTarget.classification || 'video',
+      expanded: false,
+      visible: videoTarget.visible !== false,
+      busy: null, // null | { stage, progress, frame, total }
+    };
+
+    let progressLabelEl = null;
+    let progressBarEl = null;
+
+    const updateProgressDom = () => {
+      if (!state.busy || !progressLabelEl || !progressBarEl) return;
+      progressLabelEl.textContent = formatVideoProgressText(state.busy);
+      if (typeof state.busy.progress === 'number') {
+        progressBarEl.classList.remove('xas-m3-progress-indeterminate');
+        const pct = Math.max(0, Math.min(100, Math.round(state.busy.progress * 100)));
+        progressBarEl.style.width = `${pct}%`;
+      } else {
+        progressBarEl.classList.add('xas-m3-progress-indeterminate');
+        progressBarEl.style.width = '';
+      }
+    };
+
+    const render = () => {
+      toolbar.style.display = state.visible ? 'flex' : 'none';
+      if (!state.visible) return;
+
+      progressLabelEl = null;
+      progressBarEl = null;
+      toolbar.textContent = '';
+      toolbar.classList.toggle(
+        'xas-expanded',
+        Boolean(state.busy) || state.expanded || state.classification !== 'video',
+      );
+
+      const pill = document.createElement('div');
+
+      if (state.busy) {
+        pill.className = 'xas-pill xas-progress-pill';
+
+        const row = document.createElement('div');
+        row.className = 'xas-progress-row';
+
+        const spinner = document.createElement('span');
+        spinner.className = 'xas-spinner';
+
+        progressLabelEl = document.createElement('span');
+        progressLabelEl.className = 'xas-progress-label';
+
+        const cancelBtn = makeIconButton({
+          icon: 'stop',
+          title: t('cancelGifTitle'),
+          size: 14,
+          onClick: () => callbacks.onCancel?.(),
+        });
+
+        row.appendChild(spinner);
+        row.appendChild(progressLabelEl);
+        row.appendChild(cancelBtn);
+
+        const track = document.createElement('div');
+        track.className = 'xas-m3-progress-track';
+        progressBarEl = document.createElement('div');
+        progressBarEl.className = 'xas-m3-progress-bar';
+        track.appendChild(progressBarEl);
+
+        pill.appendChild(row);
+        pill.appendChild(track);
+        toolbar.appendChild(pill);
+        updateProgressDom();
+        return;
+      }
+
+      if (state.classification === 'native_gif' || state.classification === 'gif_like_video') {
+        pill.className = 'xas-pill xas-suggested';
+
+        const gifBtn = document.createElement('button');
+        gifBtn.type = 'button';
+        gifBtn.className = 'xas-btn xas-btn-accent';
+        const isGifLike = state.classification === 'gif_like_video';
+        gifBtn.title = isGifLike ? t('saveGifLikeTitle') : t('saveGifTitle');
+        appendIconLabel(gifBtn, isGifLike ? 'auto_awesome' : 'gif_box', t('gifLabel'), 15);
+        gifBtn.addEventListener('click', (e) => {
+          stopBubble(e);
+          callbacks.onExportGif?.();
+        });
+
+        const sep = document.createElement('span');
+        sep.className = 'xas-sep';
+
+        const mp4Btn = document.createElement('button');
+        mp4Btn.type = 'button';
+        mp4Btn.className = 'xas-btn';
+        mp4Btn.title = t('downloadMp4Title');
+        mp4Btn.textContent = t('mp4Label');
+        mp4Btn.addEventListener('click', (e) => {
+          stopBubble(e);
+          callbacks.onDownloadMp4?.();
+        });
+
+        pill.appendChild(gifBtn);
+        pill.appendChild(sep);
+        pill.appendChild(mp4Btn);
+        pill.appendChild(
+          makeIconButton({
+            icon: 'settings',
+            title: t('settingsTitle'),
+            size: 15,
+            onClick: () => callbacks.onOpenSettings?.(),
+          }),
+        );
+        toolbar.appendChild(pill);
+        return;
+      }
+
+      if (!state.expanded) {
+        pill.className = 'xas-pill xas-collapsed';
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'xas-btn';
+        trigger.title = t('expandVideoToolsTitle');
+        appendIconLabel(trigger, 'gif_box', t('gifLabel'), 15);
+        trigger.addEventListener('click', (e) => {
+          stopBubble(e);
+          state.expanded = true;
+          render();
+        });
+        pill.appendChild(trigger);
+        toolbar.appendChild(pill);
+        return;
+      }
+
+      pill.className = 'xas-pill';
+      const exportBtn = document.createElement('button');
+      exportBtn.type = 'button';
+      exportBtn.className = 'xas-btn xas-btn-accent';
+      exportBtn.title = t('saveGifTitle');
+      appendIconLabel(exportBtn, 'gif_box', t('exportGifLabel'), 15);
+      exportBtn.addEventListener('click', (e) => {
+        stopBubble(e);
+        callbacks.onExportGif?.();
+      });
+
+      const mp4Btn = document.createElement('button');
+      mp4Btn.type = 'button';
+      mp4Btn.className = 'xas-btn';
+      mp4Btn.title = t('downloadMp4Title');
+      appendIconLabel(mp4Btn, 'movie', t('mp4Label'), 15);
+      mp4Btn.addEventListener('click', (e) => {
+        stopBubble(e);
+        callbacks.onDownloadMp4?.();
+      });
+
+      pill.appendChild(exportBtn);
+      pill.appendChild(mp4Btn);
+      pill.appendChild(
+        makeIconButton({
+          icon: 'settings',
+          title: t('settingsTitle'),
+          size: 15,
+          onClick: () => callbacks.onOpenSettings?.(),
+        }),
+      );
+      pill.appendChild(
+        makeIconButton({
+          icon: 'close',
+          title: t('collapseVideoToolsTitle'),
+          size: 15,
+          onClick: () => {
+            state.expanded = false;
+            render();
+          },
+        }),
+      );
+      toolbar.appendChild(pill);
+    };
+
+    render();
+
+    return {
+      setClassification(kind) {
+        if (state.classification === kind) return;
+        state.classification = kind;
+        render();
+      },
+      setProgress(info) {
+        if (info && state.busy && progressLabelEl && progressBarEl) {
+          state.busy = info;
+          updateProgressDom();
+          return;
+        }
+        state.busy = info || null;
+        render();
+      },
+      setVisible(visible) {
+        const next = Boolean(visible);
+        if (state.visible === next) return;
+        state.visible = next;
+        render();
+      },
+      destroy() {
+        container.classList.remove('xas-video-root');
+        toolbar.remove();
+      },
+    };
+  }
+
   // --- main.js ---
   // Replaced at build time with contents of src/styles.css.
   const STYLES_CSS = `
-  .xas-root {
+  .xas-root,
+  .xas-video-root {
     position: relative !important;
+  }
+
+  .xas-toolbar,
+  .xas-video-toolbar,
+  .xas-lightbox,
+  .xas-modal-backdrop,
+  .xas-toast {
+    --xas-primary: #8ccdff;
+    --xas-on-primary: #00344f;
+    --xas-primary-container: #004b70;
+    --xas-on-primary-container: #cbe6ff;
+    --xas-secondary-container: #384956;
+    --xas-on-secondary-container: #d3e5f5;
+    --xas-surface-container-low: #181c20;
+    --xas-surface-container: #1c2024;
+    --xas-surface-container-high: #262b31;
+    --xas-surface-container-highest: #31363d;
+    --xas-on-surface: #e1e3e8;
+    --xas-on-surface-variant: #c1c7ce;
+    --xas-outline: #8b9198;
+    --xas-outline-variant: #41484d;
+    --xas-primary-hover: rgba(140, 205, 255, 0.12);
+    --xas-error: #ffb4ab;
+    --xas-inverse-surface: #e1e3e8;
+    --xas-inverse-on-surface: #2d3135;
+  }
+
+  .xas-modal-backdrop.xas-theme-light {
+    --xas-primary: #006495;
+    --xas-on-primary: #ffffff;
+    --xas-primary-container: #cbe6ff;
+    --xas-on-primary-container: #001e30;
+    --xas-secondary-container: #d3e5f5;
+    --xas-on-secondary-container: #0c1d29;
+    --xas-surface-container-low: #f4f7fb;
+    --xas-surface-container: #eef2f7;
+    --xas-surface-container-high: #e8edf3;
+    --xas-surface-container-highest: #dde3ea;
+    --xas-on-surface: #181c20;
+    --xas-on-surface-variant: #41484d;
+    --xas-outline: #72787e;
+    --xas-outline-variant: #c1c7ce;
+    --xas-primary-hover: rgba(0, 100, 149, 0.1);
+    --xas-error: #ba1a1a;
   }
 
   .xas-root.xas-active {
@@ -3605,7 +5774,8 @@
     color: #ffffff;
   }
 
-  .xas-toolbar {
+  .xas-toolbar,
+  .xas-video-toolbar {
     position: absolute;
     top: 8px;
     right: 8px;
@@ -3629,35 +5799,98 @@
     gap: 3px;
     padding: 4px 6px;
     border-radius: 999px;
-    background: rgba(15, 20, 25, 0.78);
-    color: #eff3f4;
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: rgba(24, 28, 32, 0.84);
+    color: var(--xas-on-surface);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32);
-    opacity: 0.78;
-    transition: opacity 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+    opacity: 0.84;
+    transition: opacity 0.18s cubic-bezier(0.2, 0, 0, 1), background 0.18s ease, border-color 0.18s ease;
   }
 
   .xas-root:hover .xas-pill,
+  .xas-video-root:hover .xas-pill,
   .xas-toolbar:hover .xas-pill,
+  .xas-video-toolbar:hover .xas-pill,
   .xas-toolbar.xas-expanded .xas-pill,
+  .xas-video-toolbar.xas-expanded .xas-pill,
   .xas-pill.xas-suggested {
     opacity: 1;
   }
 
   .xas-pill.xas-suggested {
-    border-color: rgba(29, 155, 240, 0.75);
-    background: rgba(15, 24, 34, 0.88);
+    border-color: rgba(140, 205, 255, 0.6);
+    background: rgba(0, 48, 72, 0.88);
   }
 
   .xas-pill.xas-collapsed {
-    opacity: 0.52;
+    opacity: 0.56;
     padding: 3px 5px;
   }
 
-  .xas-root:hover .xas-pill.xas-collapsed {
-    opacity: 0.95;
+  .xas-root:hover .xas-pill.xas-collapsed,
+  .xas-video-root:hover .xas-pill.xas-collapsed {
+    opacity: 0.96;
+  }
+
+  .xas-pill.xas-progress-pill {
+    position: relative;
+    overflow: hidden;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 5px 10px 8px;
+    border-radius: 16px;
+    min-width: 156px;
+    opacity: 1;
+    background: rgba(24, 28, 32, 0.92);
+    border-color: rgba(140, 205, 255, 0.45);
+  }
+
+  .xas-progress-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--xas-on-surface);
+  }
+
+  .xas-progress-label {
+    flex: 1;
+    white-space: nowrap;
+  }
+
+  .xas-m3-progress-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(140, 205, 255, 0.22);
+    overflow: hidden;
+  }
+
+  .xas-m3-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--xas-primary);
+    transition: width 0.16s linear;
+  }
+
+  .xas-m3-progress-bar.xas-m3-progress-indeterminate {
+    width: 42% !important;
+    animation: xas-indeterminate 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
+  @keyframes xas-indeterminate {
+    0% {
+      transform: translateX(-110%);
+    }
+    100% {
+      transform: translateX(260%);
+    }
   }
 
   .xas-icon {
@@ -3700,13 +5933,23 @@
     cursor: wait;
   }
 
+  .xas-btn:focus-visible,
+  .xas-lb-btn:focus-visible,
+  .xas-m3-icon-btn:focus-visible,
+  .xas-m3-seg-btn:focus-visible,
+  .xas-m3-text-btn:focus-visible,
+  .xas-m3-filled-btn:focus-visible {
+    outline: 2px solid var(--xas-primary);
+    outline-offset: 2px;
+  }
+
   .xas-btn.xas-btn-active {
-    background: #1d9bf0;
-    color: #ffffff;
+    background: var(--xas-primary);
+    color: var(--xas-on-primary);
   }
 
   .xas-btn.xas-btn-accent {
-    color: #6cc5ff;
+    color: var(--xas-primary);
   }
 
   .xas-sep {
@@ -3871,13 +6114,13 @@
   }
 
   .xas-lb-btn.xas-lb-primary {
-    background: #1d9bf0;
-    border-color: #1d9bf0;
-    color: #fff;
+    background: var(--xas-primary);
+    border-color: var(--xas-primary);
+    color: var(--xas-on-primary);
   }
 
   .xas-lb-btn.xas-lb-primary:hover {
-    background: #1a8cd8;
+    filter: brightness(1.06);
   }
 
   .xas-lb-viewport {
@@ -3946,118 +6189,419 @@
     pointer-events: none;
   }
 
-  /* Settings Modal */
+  /* Material Design 3 Settings Dialog */
   .xas-modal-backdrop {
     position: fixed;
     inset: 0;
     z-index: 2147483100;
-    background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.56);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 16px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+
+  @keyframes xas-dialog-in {
+    from {
+      opacity: 0;
+      transform: translateY(10px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
   }
 
   .xas-modal {
     width: 100%;
-    max-width: 440px;
-    background: #15202b;
-    color: #eff3f4;
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    border-radius: 16px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    max-width: 520px;
+    max-height: min(88vh, 760px);
+    display: flex;
+    flex-direction: column;
+    background: var(--xas-surface-container-high);
+    color: var(--xas-on-surface);
+    border: 1px solid var(--xas-outline-variant);
+    border-radius: 28px;
+    box-shadow:
+      0 12px 36px rgba(0, 0, 0, 0.34),
+      0 4px 12px rgba(0, 0, 0, 0.22);
     overflow: hidden;
+    animation: xas-dialog-in 0.2s cubic-bezier(0.2, 0, 0, 1);
   }
 
   .xas-modal-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 14px 18px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    gap: 14px;
+    padding: 20px 20px 16px 24px;
+    flex-shrink: 0;
+  }
+
+  .xas-m3-head-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: var(--xas-primary-container);
+    color: var(--xas-on-primary-container);
+  }
+
+  .xas-m3-head-text {
+    flex: 1;
+    min-width: 0;
   }
 
   .xas-modal-head h3 {
     margin: 0;
-    font-size: 16px;
-    font-weight: 700;
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 26px;
+    letter-spacing: -0.01em;
+    color: var(--xas-on-surface);
+  }
+
+  .xas-m3-head-subtitle {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--xas-on-surface-variant);
+  }
+
+  .xas-m3-icon-btn {
+    appearance: none;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--xas-on-surface-variant);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.16s ease, color 0.16s ease;
+  }
+
+  .xas-m3-icon-btn:hover {
+    background: rgba(128, 128, 128, 0.16);
+    color: var(--xas-on-surface);
   }
 
   .xas-modal-body {
-    padding: 16px 18px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 24px 16px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 18px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--xas-outline-variant) transparent;
   }
 
-  .xas-field {
+  .xas-m3-section {
     display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .xas-m3-section-title {
+    padding: 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--xas-primary);
+  }
+
+  .xas-m3-card {
+    background: var(--xas-surface-container-low);
+    border: 1px solid var(--xas-outline-variant);
+    border-radius: 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .xas-m3-row,
+  .xas-m3-row-stack {
+    padding: 14px 16px;
+    display: flex;
+    gap: 14px;
+    transition: background 0.15s ease;
+  }
+
+  .xas-m3-row {
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    font-size: 13px;
-  }
-
-  .xas-field-col {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    font-size: 13px;
-  }
-
-  .xas-field-desc {
-    font-size: 11px;
-    color: #8b98a5;
-    margin-top: 2px;
-  }
-
-  .xas-select,
-  .xas-input {
-    background: #1e2d3d;
-    color: #eff3f4;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 8px;
-    padding: 6px 10px;
-    font: inherit;
-    font-size: 13px;
-  }
-
-  .xas-checkbox {
-    width: 18px;
-    height: 18px;
-    accent-color: #1d9bf0;
     cursor: pointer;
   }
 
+  .xas-m3-row:hover {
+    background: rgba(128, 128, 128, 0.08);
+  }
+
+  .xas-m3-row-stack {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .xas-m3-row + .xas-m3-row,
+  .xas-m3-row + .xas-m3-row-stack,
+  .xas-m3-row-stack + .xas-m3-row,
+  .xas-m3-row-stack + .xas-m3-row-stack {
+    border-top: 1px solid var(--xas-outline-variant);
+  }
+
+  .xas-m3-row-copy {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .xas-m3-row-title {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 20px;
+    color: var(--xas-on-surface);
+  }
+
+  .xas-m3-row-desc {
+    font-size: 12px;
+    line-height: 17px;
+    color: var(--xas-on-surface-variant);
+    margin-top: 2px;
+  }
+
+  /* M3 Switch */
+  .xas-m3-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    width: 52px;
+    height: 32px;
+    cursor: pointer;
+  }
+
+  .xas-m3-switch-input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    margin: 0;
+  }
+
+  .xas-m3-switch-track {
+    position: relative;
+    width: 52px;
+    height: 32px;
+    border-radius: 999px;
+    background: var(--xas-surface-container-highest);
+    border: 2px solid var(--xas-outline);
+    box-sizing: border-box;
+    transition:
+      background 0.2s cubic-bezier(0.2, 0, 0, 1),
+      border-color 0.2s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .xas-m3-switch-thumb {
+    position: absolute;
+    top: 50%;
+    left: 6px;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--xas-outline);
+    color: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transform: translateY(-50%);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+    transition:
+      transform 0.2s cubic-bezier(0.2, 0, 0, 1),
+      width 0.2s cubic-bezier(0.2, 0, 0, 1),
+      height 0.2s cubic-bezier(0.2, 0, 0, 1),
+      background 0.2s cubic-bezier(0.2, 0, 0, 1),
+      color 0.2s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .xas-m3-switch:hover .xas-m3-switch-thumb {
+    box-shadow: 0 0 0 8px var(--xas-primary-hover);
+  }
+
+  .xas-m3-switch-input:focus-visible + .xas-m3-switch-track {
+    outline: 2px solid var(--xas-primary);
+    outline-offset: 2px;
+  }
+
+  .xas-m3-switch-input:checked + .xas-m3-switch-track {
+    background: var(--xas-primary);
+    border-color: var(--xas-primary);
+  }
+
+  .xas-m3-switch-input:checked + .xas-m3-switch-track .xas-m3-switch-thumb {
+    width: 24px;
+    height: 24px;
+    transform: translate(16px, -50%);
+    background: var(--xas-on-primary);
+    color: var(--xas-primary);
+  }
+
+  /* M3 Segmented Button Group */
+  .xas-m3-segmented {
+    display: flex;
+    width: 100%;
+    border-radius: 20px;
+    overflow: hidden;
+    border: 1px solid var(--xas-outline);
+    background: transparent;
+  }
+
+  .xas-m3-seg-btn {
+    appearance: none;
+    flex: 1 1 0;
+    min-width: 0;
+    height: 36px;
+    padding: 0 10px;
+    border: none;
+    background: transparent;
+    color: var(--xas-on-surface);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    white-space: nowrap;
+    transition: background 0.16s ease, color 0.16s ease;
+  }
+
+  .xas-m3-seg-btn + .xas-m3-seg-btn {
+    border-left: 1px solid var(--xas-outline);
+  }
+
+  .xas-m3-seg-btn:hover {
+    background: rgba(128, 128, 128, 0.12);
+  }
+
+  .xas-m3-seg-btn.xas-m3-seg-active {
+    background: var(--xas-secondary-container);
+    color: var(--xas-on-secondary-container);
+    font-weight: 600;
+  }
+
+  /* M3 Outlined Text Field */
+  .xas-m3-textfield {
+    width: 100%;
+    box-sizing: border-box;
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 12px;
+    border: 1px solid var(--xas-outline);
+    background: var(--xas-surface-container);
+    color: var(--xas-on-surface);
+    font: inherit;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+
+  .xas-m3-textfield:hover {
+    border-color: var(--xas-on-surface);
+  }
+
+  .xas-m3-textfield:focus {
+    border-color: var(--xas-primary);
+    box-shadow: inset 0 0 0 1px var(--xas-primary);
+  }
+
+  .xas-m3-preview-line {
+    font-size: 11px;
+    color: var(--xas-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    word-break: break-all;
+  }
+
+  /* M3 Dialog Actions */
   .xas-modal-foot {
     display: flex;
     justify-content: flex-end;
+    align-items: center;
     gap: 8px;
-    padding: 12px 18px;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 14px 24px 20px;
+    border-top: 1px solid var(--xas-outline-variant);
+    flex-shrink: 0;
   }
 
-  /* Toast */
+  .xas-m3-text-btn,
+  .xas-m3-filled-btn {
+    appearance: none;
+    height: 40px;
+    padding: 0 20px;
+    border-radius: 999px;
+    border: none;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: background 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease;
+  }
+
+  .xas-m3-text-btn {
+    background: transparent;
+    color: var(--xas-primary);
+  }
+
+  .xas-m3-text-btn:hover {
+    background: var(--xas-primary-hover);
+  }
+
+  .xas-m3-filled-btn {
+    background: var(--xas-primary);
+    color: var(--xas-on-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  }
+
+  .xas-m3-filled-btn:hover {
+    filter: brightness(1.06);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.32);
+  }
+
+  /* M3 Snackbar */
   .xas-toast {
     position: fixed;
     left: 50%;
-    bottom: 26px;
+    bottom: 24px;
     transform: translateX(-50%) translateY(12px);
     z-index: 2147483200;
-    padding: 10px 16px;
-    border-radius: 999px;
-    background: rgba(15, 20, 25, 0.94);
-    color: #eff3f4;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 12px 18px;
+    border-radius: 12px;
+    background: var(--xas-inverse-surface);
+    color: var(--xas-inverse-on-surface);
+    box-shadow:
+      0 6px 20px rgba(0, 0, 0, 0.36),
+      0 2px 6px rgba(0, 0, 0, 0.24);
+    font-family: "Roboto", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 500;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.18s ease, transform 0.18s ease;
+    transition: opacity 0.18s cubic-bezier(0.2, 0, 0, 1), transform 0.18s cubic-bezier(0.2, 0, 0, 1);
   }
 
   .xas-toast.xas-toast-visible {
@@ -4066,8 +6610,9 @@
   }
 
   .xas-toast.xas-toast-error {
-    border-color: rgba(244, 33, 46, 0.7);
-    color: #ff9aa2;
+    background: #410002;
+    color: var(--xas-error);
+    border: 1px solid rgba(255, 180, 171, 0.45);
   }
   `;
 
@@ -4151,8 +6696,11 @@
   let config = loadConfig();
 
   const detectQueue = new TaskQueue(3);
+  const videoProbeQueue = new TaskQueue(2);
   const analysisCache = new LruCache(200);
+  const videoProbeCache = new LruCache(200);
   const origBlobCache = new LruCache(96);
+  const mp4BlobCache = new LruCache(12);
   const previewUrlCache = new LruCache(48, (entry) => {
     if (entry?.objectUrl) {
       URL.revokeObjectURL(entry.objectUrl);
@@ -4162,6 +6710,8 @@
 
   const containerControllers = new WeakMap();
   const activeControllers = new Set();
+  const videoControllers = new WeakMap();
+  const activeVideoControllers = new Set();
 
   function debugLog(...args) {
     if (config.debug) {
@@ -4696,10 +7246,256 @@
 
   let visibilityObserver = null;
 
+  function formatByteSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+
+  function selectVariantForGif(variants, maxWidth) {
+    if (!Array.isArray(variants) || variants.length === 0) return null;
+    if (maxWidth > 0) {
+      const sufficient = variants.filter((v) => v.width >= maxWidth);
+      if (sufficient.length > 0) {
+        return sufficient[sufficient.length - 1];
+      }
+    }
+    return variants[0];
+  }
+
+  function getProbeVariant(variants) {
+    if (!Array.isArray(variants) || variants.length === 0) return null;
+    return variants[variants.length - 1] || variants[0];
+  }
+
+  async function fetchCachedMp4Blob(urls) {
+    const uniqueUrls = Array.from(new Set(urls.filter(Boolean)));
+    const cacheKey = uniqueUrls[0];
+    let blob = cacheKey ? mp4BlobCache.get(cacheKey) : null;
+    if (!blob) {
+      blob = await fetchBlobWithFallback(uniqueUrls);
+      if (cacheKey) mp4BlobCache.set(cacheKey, blob);
+    }
+    return blob;
+  }
+
+  function createVideoController(target) {
+    const probeVariant = getProbeVariant(target.variants);
+    const probeKey = target.mediaKey || probeVariant?.url || target.bestMp4Url;
+    const cachedProbe = probeKey ? videoProbeCache.get(probeKey) : null;
+
+    let classification = classifyGifMedia({
+      type: target.type,
+      mp4Url: target.bestMp4Url,
+      posterUrl: target.posterUrl,
+      hasGifBadge: target.hasGifBadge,
+      durationMs: target.durationMs,
+      mp4Probe: cachedProbe,
+      maxAutoDurationSec: 12,
+    });
+
+    let probeStarted = Boolean(cachedProbe);
+    let activeJob = null;
+
+    const isVisible = () =>
+      Boolean(config.enableGifTools && (classification !== 'video' || config.showOnRegularVideos));
+
+    const handleExportGif = async () => {
+      if (activeJob) return;
+      const job = { cancelled: false };
+      activeJob = job;
+
+      const selected = selectVariantForGif(target.variants, config.gifMaxWidth);
+      const candidateUrls = [selected?.url, target.bestMp4Url];
+
+      ui.setProgress({ stage: 'fetch', progress: null });
+      try {
+        const mp4Blob = await fetchCachedMp4Blob(candidateUrls);
+        if (job.cancelled) throw new Error('Cancelled');
+
+        const result = await transcodeMp4BlobToGif(mp4Blob, {
+          fps: Number(config.gifFps) || 15,
+          maxWidth: Number(config.gifMaxWidth) || 0,
+          quality: config.gifQuality || 'balanced',
+          maxDurationSec: Number(config.gifMaxDuration) || 15,
+          onProgress: (info) => {
+            if (!job.cancelled) ui.setProgress(info);
+          },
+          isCancelled: () => job.cancelled,
+        });
+
+        if (job.cancelled) throw new Error('Cancelled');
+
+        const layoutTag = target.videoCount > 1 ? `gif_v${target.videoIndex + 1}` : 'gif';
+        const filename = formatFilename(config.filenameTemplate, {
+          handle: target.handle,
+          tweetId: target.tweetId,
+          layout: layoutTag,
+          ext: 'gif',
+        });
+        downloadBlob(result.blob, filename);
+
+        const summary = `${result.width}×${result.height}, ${formatByteSize(result.blob.size)}`;
+        const truncNote = result.truncated
+          ? ` (first ${Number(config.gifMaxDuration) || 15}s)`
+          : '';
+        showToast(`Saved ${filename} (${summary})${truncNote}`);
+      } catch (err) {
+        if (job.cancelled || err?.message === 'Cancelled') {
+          showToast(t('gifCancelled'));
+        } else {
+          console.error('[XAS] GIF export failed:', err);
+          showToast(`GIF export failed: ${err.message}`, true);
+        }
+      } finally {
+        if (activeJob === job) {
+          activeJob = null;
+        }
+        ui.setProgress(null);
+      }
+    };
+
+    const handleDownloadMp4 = async () => {
+      if (activeJob) return;
+      const job = { cancelled: false };
+      activeJob = job;
+
+      ui.setProgress({ stage: 'fetch', progress: null });
+      try {
+        const mp4Blob = await fetchCachedMp4Blob(target.variants.map((v) => v.url));
+        if (job.cancelled) throw new Error('Cancelled');
+
+        const layoutTag = target.videoCount > 1 ? `video_v${target.videoIndex + 1}` : 'video';
+        const filename = formatFilename(config.filenameTemplate, {
+          handle: target.handle,
+          tweetId: target.tweetId,
+          layout: layoutTag,
+          ext: 'mp4',
+        });
+        downloadBlob(mp4Blob, filename);
+        showToast(`Downloaded ${filename} (${formatByteSize(mp4Blob.size)})`);
+      } catch (err) {
+        if (job.cancelled || err?.message === 'Cancelled') {
+          showToast(t('gifCancelled'));
+        } else {
+          console.error('[XAS] MP4 download failed:', err);
+          showToast(`MP4 download failed: ${err.message}`, true);
+        }
+      } finally {
+        if (activeJob === job) {
+          activeJob = null;
+        }
+        ui.setProgress(null);
+      }
+    };
+
+    const ui = createVideoUI(
+      { ...target, classification, visible: isVisible() },
+      {
+        onExportGif: handleExportGif,
+        onDownloadMp4: handleDownloadMp4,
+        onCancel: () => {
+          if (activeJob) activeJob.cancelled = true;
+        },
+        onOpenSettings: openSettings,
+      },
+    );
+
+    const triggerAutoProbe = () => {
+      if (
+        probeStarted ||
+        !config.enableGifTools ||
+        !config.autoDetectGifVideos ||
+        classification !== 'video' ||
+        !(target.durationMs > 0 && target.durationMs <= 12000) ||
+        !probeVariant?.url
+      ) {
+        return;
+      }
+      probeStarted = true;
+
+      videoProbeQueue
+        .enqueue(async () => {
+          const cached = probeKey ? videoProbeCache.get(probeKey) : null;
+          if (cached) return cached;
+          const buf = await fetchRangeBuffer(probeVariant.url, 0, 65535);
+          const parsed = parseMp4Metadata(buf);
+          if (probeKey) videoProbeCache.set(probeKey, parsed);
+          return parsed;
+        })
+        .then((mp4Probe) => {
+          if (!target.container.isConnected) return;
+          const nextClass = classifyGifMedia({
+            type: target.type,
+            mp4Url: target.bestMp4Url,
+            posterUrl: target.posterUrl,
+            hasGifBadge: target.hasGifBadge,
+            durationMs: target.durationMs,
+            mp4Probe,
+            maxAutoDurationSec: 12,
+          });
+
+          debugLog('Probed video header', {
+            handle: target.handle,
+            tweetId: target.tweetId,
+            durationMs: target.durationMs,
+            hasMoov: mp4Probe.hasMoov,
+            complete: mp4Probe.complete,
+            hasAudio: mp4Probe.hasAudio,
+            classification: nextClass,
+          });
+
+          if (nextClass !== classification) {
+            classification = nextClass;
+            ui.setClassification(classification);
+            ui.setVisible(isVisible());
+          }
+        })
+        .catch((err) => {
+          debugLog('Video header probe skipped:', err);
+        });
+    };
+
+    const controller = {
+      target,
+      signature: target.signature,
+      triggerAutoProbe,
+      refreshConfig() {
+        ui.setVisible(isVisible());
+        if (
+          !probeStarted &&
+          config.enableGifTools &&
+          config.autoDetectGifVideos &&
+          classification === 'video' &&
+          target.durationMs > 0 &&
+          target.durationMs <= 12000 &&
+          visibilityObserver &&
+          target.container.isConnected
+        ) {
+          visibilityObserver.observe(target.container);
+        }
+      },
+      destroy() {
+        if (activeJob) activeJob.cancelled = true;
+        visibilityObserver?.unobserve(target.container);
+        ui.destroy();
+        activeVideoControllers.delete(controller);
+      },
+    };
+
+    activeVideoControllers.add(controller);
+    return controller;
+  }
+
   function scanPage() {
     for (const ctrl of activeControllers) {
       if (!ctrl.gallery.container.isConnected) {
         activeControllers.delete(ctrl);
+      }
+    }
+    for (const vctrl of activeVideoControllers) {
+      if (!vctrl.target.container.isConnected) {
+        activeVideoControllers.delete(vctrl);
       }
     }
 
@@ -4718,6 +7514,23 @@
         containerControllers.set(gallery.container, ctrl);
         if (config.autoDetect && visibilityObserver) {
           visibilityObserver.observe(gallery.container);
+        }
+      }
+
+      if (config.enableGifTools) {
+        const videos = extractVideosFromArticle(article);
+        for (const target of videos) {
+          const existing = videoControllers.get(target.container);
+          if (existing) {
+            if (existing.signature === target.signature) continue;
+            existing.destroy();
+          }
+
+          const vctrl = createVideoController(target);
+          videoControllers.set(target.container, vctrl);
+          if (config.autoDetectGifVideos && visibilityObserver) {
+            visibilityObserver.observe(target.container);
+          }
         }
       }
     }
@@ -4745,6 +7558,12 @@
           }
         }
       }
+      for (const vctrl of activeVideoControllers) {
+        if (vctrl.target.container.isConnected) {
+          vctrl.refreshConfig();
+        }
+      }
+      scheduleScan();
     });
   }
 
@@ -4769,10 +7588,19 @@
       (entries) => {
         for (const entry of entries) {
           if (!entry.isIntersecting) continue;
+          let handled = false;
           const ctrl = containerControllers.get(entry.target);
           if (ctrl) {
-            visibilityObserver.unobserve(entry.target);
             ctrl.triggerAutoDetect();
+            handled = true;
+          }
+          const vctrl = videoControllers.get(entry.target);
+          if (vctrl) {
+            vctrl.triggerAutoProbe();
+            handled = true;
+          }
+          if (handled) {
+            visibilityObserver.unobserve(entry.target);
           }
         }
       },
@@ -4791,7 +7619,10 @@
             return;
           }
         }
-        if (mutation.type === 'attributes' && mutation.target.tagName === 'IMG') {
+        if (
+          mutation.type === 'attributes' &&
+          (mutation.target.tagName === 'IMG' || mutation.target.tagName === 'VIDEO')
+        ) {
           scheduleScan();
           return;
         }
@@ -4802,7 +7633,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['src'],
+      attributeFilter: ['src', 'poster'],
     });
 
     scheduleScan();
